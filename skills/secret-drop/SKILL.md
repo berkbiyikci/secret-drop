@@ -21,9 +21,9 @@ dialog; you only ever see names and lengths.
 secret-drop ask NAME TARGET "where to find it"
 ```
 
-A dialog opens on the user's screen. Tell them it is there. Exit codes: `0` saved, `1` cancelled or timed out
-(ask whether to retry, don't loop), `2` bad usage, `3` the dialog could not open: if you run in a sandbox,
-rerun the same command with elevated permissions.
+A dialog opens on the user's screen. Tell them it is there. Exit codes: `0` saved, `1` the user cancelled or
+the dialog timed out (ask whether to retry, don't loop), `2` bad usage, `3` the dialog could not open (if you
+run in a sandbox, rerun the same command with elevated permissions), `4` anything else failed (read the message).
 
 Pick the target:
 

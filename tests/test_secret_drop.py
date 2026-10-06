@@ -12,6 +12,7 @@ import sys
 import tempfile
 import textwrap
 import threading
+import time
 import unittest
 import urllib.parse
 import urllib.request
@@ -74,7 +75,7 @@ class FileTarget(Base):
     def test_missing_directory_fails_before_prompting(self):
         r = self.run_cli("ask", "API_KEY", f"file:{self.path('nope/env')}",
                          SECRET_DROP_PROMPTER=f"touch {self.path('prompted')}")
-        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.returncode, 4)
         self.assertFalse(os.path.exists(self.path("prompted")))
 
 
@@ -98,7 +99,7 @@ class Validation(Base):
     def test_line_break_is_rejected(self):
         r = self.run_cli("ask", "KEY", f"file:{self.path('env')}",
                          SECRET_DROP_PROMPTER="printf 'abc\\nEVIL=1'")
-        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.returncode, 4)
         self.assertFalse(os.path.exists(self.path("env")))
 
     def test_surrounding_whitespace_is_trimmed(self):
@@ -124,7 +125,7 @@ class ExecAndThen(Base):
 
     def test_exec_failure_is_reported(self):
         r = self.run_cli("ask", "KEY", "exec:exit 3")
-        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.returncode, 4)
         self.assertIn("exit 3", r.stderr)
 
     def test_then_runs_after_write_without_the_value(self):
@@ -138,7 +139,7 @@ class ExecAndThen(Base):
 
     def test_then_failure_is_reported(self):
         r = self.run_cli("ask", "KEY", f"file:{self.path('env')}", "--then", "exit 4")
-        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.returncode, 4)
         self.assertIn("exit 4", r.stderr)
 
 
@@ -178,10 +179,11 @@ class SshTarget(Base):
         remote = self.path("remote env")  # a space, to exercise quoting
         with open(remote, "w") as f:
             f.write("OTHER=1\nKEY=old\n")
+        os.chmod(remote, 0o640)  # e.g. group-readable by a service account
         r = self.run_cli("ask", "KEY", f"ssh:myhost:{remote}")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.read("remote env"), f"OTHER=1\nKEY={VALUE}\n")
-        self.assertEqual(stat.S_IMODE(os.stat(remote).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(remote).st_mode), 0o640)  # an existing file keeps its mode
         self.assertNotIn(VALUE, self.read("ssh-argv"))
         self.assertEqual(os.listdir(self.dir).count("remote env"), 1)  # no temp file left behind
 
@@ -189,13 +191,14 @@ class SshTarget(Base):
         r = self.run_cli("ask", "KEY", "ssh:myhost:~/app.env")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.read("app.env"), f"KEY={VALUE}\n")
+        self.assertEqual(stat.S_IMODE(os.stat(self.path("app.env")).st_mode), 0o600)  # a new file is 600
 
     def test_unreachable_host_fails_before_prompting(self):
         bad = os.path.join(self.path("bin"), "ssh")
         with open(bad, "w") as f:
             f.write("#!/bin/sh\nexit 255\n")
         r = self.run_cli("ask", "KEY", "ssh:myhost:/x", SECRET_DROP_PROMPTER=f"touch {self.path('prompted')}")
-        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.returncode, 4)
         self.assertFalse(os.path.exists(self.path("prompted")))
 
 
@@ -290,7 +293,7 @@ class GoogleOAuth(Base):
 
     def test_denied_consent_writes_nothing(self):
         code, _, err = self.run_flow(deny=True)
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 4)
         self.assertIn("access_denied", err)
         self.assertFalse(os.path.exists(self.path("env")))
 
@@ -315,7 +318,7 @@ class GitAndRegistry(Base):
             f.write("A=1\n")
         self.git("add", ".env")
         r = self.run_cli("ask", "KEY", f"file:{self.path('.env')}", SECRET_DROP_PROMPTER=f"touch {self.path('prompted')}")
-        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.returncode, 4)
         self.assertIn("git rm --cached", r.stderr)
         self.assertFalse(os.path.exists(self.path("prompted")))
 
@@ -486,6 +489,166 @@ class Install(Base):
         self.assertFalse(os.path.lexists(self.path(".local/bin/secret-drop")))
 
 
+class ReviewRegressions(Base):
+    """One test per finding of the pre-release review, so none of them comes back."""
+
+    def setUp(self):
+        super().setUp()
+        os.makedirs(self.path("api"))
+        for name in (".env", "api/.env"):
+            with open(self.path(name), "w") as f:
+                f.write(f"API_TOKEN={VALUE}\n")
+
+    def decide(self, tool, **tool_input):
+        return Guard.decide(self, tool, **tool_input)
+
+    def test_guard_checks_what_secret_drop_runs(self):
+        os.makedirs(self.path(".aws"))
+        with open(self.path(".aws/credentials"), "w") as f:
+            f.write("[default]\naws_secret_access_key=abc\n")
+        for command in ("secret-drop run -- cat .env", "secret-drop run -f .env -- sh -c 'cat .env | base64'",
+                        'secret-drop ask K file:.env --then "tail -1 .env"',
+                        "secret-drop run -- sh -c 'cat ~/.aws/credentials'", "secret-drop ask K 'exec:cat .env >&2'"):
+            self.assertEqual(self.decide("Bash", command=command), "deny", command)
+
+    def test_then_output_is_scrubbed(self):
+        r = self.run_cli("ask", "KEY", f"file:{self.path('out.env')}", "--then", f"cat {self.path('out.env')}")
+        self.assertIn("KEY=[redacted:KEY]", r.stdout)
+
+    def test_plain_word_secrets_are_still_secrets(self):
+        r = self.run_cli("ask", "DB_PW", f"file:{self.path('app.conf')}", FAKE_VALUE="correcthorse")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.decide("Read", file_path="app.conf"), "deny")
+        self.assertEqual(self.decide("Bash", command="cat app.conf"), "deny")
+        out = self.run_cli("run", "-f", self.path("app.conf"), "--", "sh", "-c", 'echo "pw=$DB_PW"').stdout
+        self.assertEqual(out, "pw=[redacted:DB_PW]\n")
+        with open(self.path("api/.env"), "w") as f:
+            f.write("DB_PW=correcthorse\nDATABASE_URL=postgres://app:correcthorse@db/app\n")
+        self.assertEqual(self.decide("Read", file_path="api/.env"), "deny")
+
+    def test_scrubber_holds_back_values_split_across_writes(self):
+        env = self.path(".env")
+        long_line = 'python3 -c "import os,sys; sys.stdout.write((\'x\'*7+os.environ[\'API_TOKEN\'])*20000)"'
+        r = self.run_cli("run", "-f", env, "--", "sh", "-c", long_line)
+        self.assertEqual(r.stdout.count("[redacted:API_TOKEN]"), 20000)
+        split = 'printf "%s" "${API_TOKEN%??????????}"; sleep 0.5; printf "%s\\n" "${API_TOKEN#???????????}"'
+        self.assertEqual(self.run_cli("run", "-f", env, "--", "sh", "-c", split).stdout, "[redacted:API_TOKEN]\n")
+
+    def test_base64_at_any_offset(self):
+        for prefix in ("user:", "x", "ab"):
+            script = f'printf "{prefix}%s" "$API_TOKEN" | base64'
+            r = self.run_cli("run", "-f", self.path(".env"), "--", "sh", "-c", script)
+            self.assertIn("[redacted:API_TOKEN]", r.stdout, prefix)
+
+    def test_guard_follows_cd_and_git_c(self):
+        for command in ("cd api && cat .env", "(cd api; head .env)", "git -C api show :.env", "cat api/.env"):
+            self.assertEqual(self.decide("Bash", command=command), "deny", command)
+
+    def test_config_typo_or_nul_never_disables_the_guard(self):
+        with open(self.config, "w") as f:
+            f.write("[settings]\ntimeout = 10m\n")
+        self.assertEqual(self.decide("Bash", command="cat .env"), "deny")
+        self.assertEqual(self.decide("Bash", command="cat ./.env\u0000"), "deny")
+
+    def test_other_ways_to_read(self):
+        deny = ["bash -c 'cat .env'", "timeout 5 sh -c \"cat .env|base64\"", "python3 -c \"print(open('.env').read())\"",
+                "cat .env*", "find . -name '*.env' -exec cat {} +", "grep -r TOKEN .", 'echo "$(cat .env)"',
+                "git add .env", "cat .ENV"]
+        for command in deny:
+            self.assertEqual(self.decide("Bash", command=command), "deny", command)
+        self.assertEqual(self.decide("Grep", pattern="TOKEN", glob="**/.env*"), "deny")
+        os.symlink(self.path(".env"), self.path("env.txt"))
+        self.assertEqual(self.decide("Read", file_path="env.txt"), "deny")
+
+    def test_normal_work_is_not_blocked(self):
+        allow = ['echo ".env" >> .gitignore', 'grep -n ".env" .gitignore', "ls -a | grep .env", "find . -name .env",
+                 "git check-ignore -v .env", "git rm --cached .env", 'git commit -m "chore: untrack apps/web/.env"',
+                 "git commit -F - <<'EOF'\nchore: stop tracking .env\nEOF", "if [ -f .env ]; then echo yes; fi",
+                 "[[ -f .env ]] && echo yes", "ssh -i ~/.ssh/id_ed25519 host uptime", "docker compose --env-file .env up -d",
+                 "wc -l .env", "rm .env", "grep -r TODO src/", "rg TOKEN"]
+        os.makedirs(self.path("src"))
+        for command in allow:
+            self.assertEqual(self.decide("Bash", command=command), "allow", command)
+
+    def test_codex_move_to(self):
+        patch = "*** Begin Patch\n*** Update File: notes.txt\n*** Move to: .env\n@@\n-a\n+b\n*** End Patch"
+        self.assertEqual(self.decide("apply_patch", command=patch), "deny")
+
+    def test_ssh_host_cannot_be_an_option(self):
+        r = self.run_cli("ask", "KEY", f"ssh:-oProxyCommand=touch {self.path('pwned')}:/x")
+        self.assertEqual(r.returncode, 2)
+        self.assertFalse(os.path.exists(self.path("pwned")))
+
+    def test_list_refuses_key_files(self):
+        with open(self.path("id_ed25519"), "w") as f:
+            f.write("-----BEGIN OPENSSH PRIVATE KEY-----\nQyNTUxOTAAAAIFAKE==\n-----END OPENSSH PRIVATE KEY-----\n")
+        r = self.run_cli("list", f"file:{self.path('id_ed25519')}")
+        self.assertEqual(r.returncode, 2)
+        self.assertNotIn("QyNT", r.stdout)
+
+    def test_run_does_not_wait_for_background_children_or_die_on_closed_pipes(self):
+        start = time.monotonic()
+        r = self.run_cli("run", "--", "sh", "-c", "sleep 30 & echo started")
+        self.assertLess(time.monotonic() - start, 10)
+        self.assertEqual(r.stdout, "started\n")
+        piped = subprocess.run(f"{sys.executable} {CLI} run -- sh -c 'yes | head -200000' | head -1", shell=True,
+                               env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual((piped.stdout, piped.stderr), ("y\n", ""))
+
+    def test_pem_redaction_is_per_stream_and_bounded(self):
+        script = ("printf -- '-----BEGIN PRIVATE KEY-----\\nMIIEv\\n'; echo IMPORTANT >&2; "
+                  "printf 'build finished OK\\n'; printf -- '-----BEGIN PGP PRIVATE KEY BLOCK-----\\nlQdG\\n'")
+        r = self.run_cli("run", "--", "sh", "-c", script)
+        self.assertIn("IMPORTANT", r.stderr)
+        self.assertIn("build finished OK", r.stdout)
+        self.assertNotIn("MIIEv", r.stdout)
+        self.assertNotIn("lQdG", r.stdout)
+
+    def test_values_with_shell_characters_round_trip(self):
+        tricky = "pa$word#1 x"
+        r = self.run_cli("ask", "KEY", f"file:{self.path('t.env')}", FAKE_VALUE=tricky)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = self.run_cli("run", "-f", self.path("t.env"), "--", "sh", "-c", 'printf %s "$KEY" | wc -c').stdout
+        self.assertEqual(out.strip(), str(len(tricky)))
+
+    def test_gitignore_entries_are_escaped(self):
+        subprocess.run(["git", "-C", self.dir, "init", "-q"], check=True)
+        self.run_cli("ask", "KEY", f"file:{self.path('prod[1].env')}")
+        ignored = subprocess.run(["git", "-C", self.dir, "check-ignore", "-q", "prod[1].env"])
+        self.assertEqual(ignored.returncode, 0)
+
+
+class InstallSafety(Base):
+    def settings(self):
+        with open(self.path(".claude/settings.json")) as f:
+            return json.load(f)
+
+    def test_shared_groups_backups_and_bad_json(self):
+        os.makedirs(self.path(".claude"))
+        mine = {"type": "command", "command": "my-audit-hook"}
+        original = {"theme": "dark ç", "hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [mine, {"type": "command", "command": "/opt/x/secret-drop guard"}]}]}}
+        with open(self.path(".claude/settings.json"), "w") as f:
+            json.dump(original, f, ensure_ascii=False)
+        for _ in range(2):
+            self.assertEqual(self.run_cli("install", "--yes").returncode, 0)
+        groups = self.settings()["hooks"]["PreToolUse"]
+        self.assertEqual(groups[0]["hooks"], [mine])
+        with open(self.path(".claude/settings.json.secret-drop-backup")) as f:
+            self.assertEqual(json.load(f), original)
+        self.assertIn("dark ç", open(self.path(".claude/settings.json"), encoding="utf-8").read())
+        self.run_cli("uninstall")
+        self.assertEqual(self.settings()["hooks"]["PreToolUse"], [{"matcher": "Bash", "hooks": [mine]}])
+
+    def test_broken_settings_stop_before_any_change(self):
+        os.makedirs(self.path(".claude"))
+        with open(self.path(".claude/settings.json"), "w") as f:
+            f.write("{not json")
+        r = self.run_cli("install", "--yes")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.lexists(self.path(".local/bin/secret-drop")))
+
+
 @unittest.skipUnless(sys.platform == "darwin" and os.environ.get("SECRET_DROP_TEST_KEYCHAIN") == "1",
                      "set SECRET_DROP_TEST_KEYCHAIN=1 on macOS to write to the login keychain")
 class KeychainReferences(Base):
@@ -500,7 +663,7 @@ class KeychainReferences(Base):
         env = self.path(".env")
         r = self.run_cli("ask", "API_TOKEN", f"keychain:{self.SERVICE}", "--ref", env)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.read(".env"), f"API_TOKEN=keychain:{self.SERVICE}\n")
+        self.assertEqual(self.read(".env"), f"API_TOKEN='keychain:{self.SERVICE}'\n")  # quoted: it has spaces
         r = self.run_cli("run", "-f", env, "--", "sh", "-c", 'echo "got $API_TOKEN"; printf %s "$API_TOKEN" | wc -c')
         self.assertIn("got [redacted:API_TOKEN]", r.stdout)
         self.assertIn(str(len(VALUE)), r.stdout)
