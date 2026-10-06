@@ -105,6 +105,11 @@ class Validation(Base):
         self.run_cli("ask", "KEY", f"file:{self.path('env')}", FAKE_VALUE=f"  {VALUE}\n")
         self.assertEqual(self.read("env"), f"KEY={VALUE}\n")
 
+    def test_broken_dialog_is_not_a_cancel(self):
+        r = self.run_cli("ask", "KEY", f"file:{self.path('env')}", SECRET_DROP_PROMPTER="echo no display >&2; exit 9")
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("sandbox", r.stderr)
+
     def test_turkish_messages(self):
         r = self.run_cli("ask", "KEY", f"file:{self.path('env')}", SECRET_DROP_LANG="tr")
         self.assertIn("yazıldı", r.stdout)
@@ -288,6 +293,231 @@ class GoogleOAuth(Base):
         self.assertEqual(code, 1)
         self.assertIn("access_denied", err)
         self.assertFalse(os.path.exists(self.path("env")))
+
+
+class GitAndRegistry(Base):
+    def git(self, *args):
+        subprocess.run(["git", "-C", self.dir, *args], check=True, capture_output=True)
+
+    def test_gitignore_entry_is_added(self):
+        self.git("init", "-q")
+        r = self.run_cli("ask", "KEY", f"file:{self.path('.env')}")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("/.env", self.read(".gitignore"))
+        self.assertIn(".gitignore", r.stdout)
+        again = self.run_cli("ask", "KEY", f"file:{self.path('.env')}")
+        self.assertEqual(self.read(".gitignore").count("/.env"), 1)
+        self.assertNotIn(".gitignore", again.stdout)
+
+    def test_tracked_file_is_refused_before_prompting(self):
+        self.git("init", "-q")
+        with open(self.path(".env"), "w") as f:
+            f.write("A=1\n")
+        self.git("add", ".env")
+        r = self.run_cli("ask", "KEY", f"file:{self.path('.env')}", SECRET_DROP_PROMPTER=f"touch {self.path('prompted')}")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("git rm --cached", r.stderr)
+        self.assertFalse(os.path.exists(self.path("prompted")))
+
+    def test_written_files_are_registered_for_the_guard(self):
+        self.run_cli("ask", "KEY", f"file:{self.path('app.conf')}")
+        with open(os.path.join(self.dir, "protected")) as f:
+            self.assertIn(os.path.realpath(self.path("app.conf")), f.read())
+
+    def test_ref_needs_keychain_target(self):
+        r = self.run_cli("ask", "KEY", f"file:{self.path('a')}", "--ref", self.path(".env"))
+        self.assertEqual(r.returncode, 2)
+
+
+class Run(Base):
+    def env_file(self, text):
+        with open(self.path(".env"), "w") as f:
+            f.write(text)
+        return self.path(".env")
+
+    def test_values_are_injected_and_scrubbed_in_every_encoding(self):
+        env = self.env_file(f"API_TOKEN={VALUE}\nPORT=3000\nNODE_ENV=production\n")
+        script = ('echo "token=$API_TOKEN port=$PORT env=$NODE_ENV"; printf %s "$API_TOKEN" | base64; '
+                  'python3 -c "import urllib.parse,os;print(urllib.parse.quote(os.environ[\'API_TOKEN\']+\'/\'))"; '
+                  'echo "err $API_TOKEN" >&2')
+        r = self.run_cli("run", "-f", env, "--", "sh", "-c", script)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("token=[redacted:API_TOKEN] port=3000 env=production", r.stdout)
+        self.assertEqual(r.stdout.count("[redacted:API_TOKEN]"), 3)
+        self.assertIn("err [redacted:API_TOKEN]", r.stderr)
+
+    def test_known_key_shapes_and_private_keys_are_scrubbed(self):
+        script = ("echo ghp_" + "a" * 36 + "; echo sk-ant-" + "b" * 30
+                  + "; printf -- '-----BEGIN PRIVATE KEY-----\\nMIIEv\\nabc\\n-----END PRIVATE KEY-----\\nafter\\n'")
+        r = self.run_cli("run", "--", "sh", "-c", script)
+        self.assertIn("[redacted:github-token]", r.stdout)
+        self.assertIn("[redacted:anthropic-key]", r.stdout)
+        self.assertIn("[redacted:private-key]", r.stdout)
+        self.assertNotIn("MIIEv", r.stdout)
+        self.assertIn("after", r.stdout)
+
+    def test_partial_line_is_scrubbed(self):
+        env = self.env_file(f"API_TOKEN={VALUE}\n")
+        r = self.run_cli("run", "-f", env, "--", "sh", "-c", 'printf "no newline $API_TOKEN"; sleep 0.5')
+        self.assertEqual(r.stdout, "no newline [redacted:API_TOKEN]")
+
+    def test_exit_code_and_literal_values(self):
+        env = self.env_file(f"X='$(touch {self.path('pwned')})'\n")
+        r = self.run_cli("run", "-f", env, "--", "sh", "-c", "exit 7")
+        self.assertEqual(r.returncode, 7)
+        self.assertFalse(os.path.exists(self.path("pwned")))
+
+    def test_bare_path_means_file(self):
+        env = self.env_file(f"API_TOKEN={VALUE}\n")
+        self.assertEqual(self.run_cli("list", env).stdout, "API_TOKEN\n")
+
+    def test_missing_command(self):
+        self.assertEqual(self.run_cli("run", "-f", self.env_file("A=1\n")).returncode, 2)
+
+    def test_list_shows_names_and_references_only(self):
+        env = self.env_file(f"API_TOKEN={VALUE}\nOTHER=keychain:myapp\n")
+        r = self.run_cli("list", f"file:{env}")
+        self.assertEqual(r.stdout, "API_TOKEN\nOTHER\tkeychain:myapp\n")
+
+
+class Guard(Base):
+    def setUp(self):
+        super().setUp()
+        with open(self.path(".env"), "w") as f:
+            f.write(f"API_TOKEN={VALUE}\n")
+        with open(self.path(".env.example"), "w") as f:
+            f.write("API_TOKEN=\n")
+
+    def decide(self, tool, **tool_input):
+        event = json.dumps({"tool_name": tool, "tool_input": tool_input, "cwd": self.dir})
+        r = subprocess.run([sys.executable, CLI, "guard"], input=event, env=self.env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        if not r.stdout.strip():
+            return "allow"
+        return json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"]
+
+    def test_reads_of_secret_files_are_denied(self):
+        self.assertEqual(self.decide("Read", file_path=self.path(".env")), "deny")
+        self.assertEqual(self.decide("Read", file_path=".env"), "deny")
+        self.assertEqual(self.decide("Edit", file_path=".env"), "deny")
+        self.assertEqual(self.decide("Grep", pattern="TOKEN", path=".env"), "deny")
+        self.assertEqual(self.decide("Read", file_path=".env.example"), "allow")
+        self.assertEqual(self.decide("Read", file_path="README.md"), "allow")
+
+    def test_write_creates_but_does_not_overwrite(self):
+        self.assertEqual(self.decide("Write", file_path=".env", content="X=1"), "deny")
+        self.assertEqual(self.decide("Write", file_path="new/.env", content="X=1"), "allow")
+
+    def test_reference_only_files_are_readable(self):
+        with open(self.path(".env"), "w") as f:
+            f.write("API_TOKEN=keychain:myapp\nPORT=3000\n")
+        self.assertEqual(self.decide("Read", file_path=".env"), "allow")
+
+    def test_shell_commands(self):
+        deny = ["cat .env", "echo $(cat .env)", "cp .env /tmp/x", "secret-drop list file:.env; cat .env",
+                "secret-drop list file:.env && head .env", "secret-drop list .env\ncat .env", "cat < .env",
+                "secret-drop run -f .env -- echo $(cat .env)",
+                "security find-generic-password -s app -a KEY -w", "security dump-keychain -d", f"less {self.dir}/.env"]
+        allow = ["secret-drop run -f .env -- npm start", "secret-drop list file:.env", "cp .env.example .env",
+                 "secret-drop list .env 2>&1", "secret-drop list file:.env | wc -l", "stat .env 2>/dev/null",
+                 "cd sub && secret-drop run -f ../.env -- make deploy",
+                 "ls -la .env", "grep -r credentials src/", "security find-generic-password -s app", "git status"]
+        for command in deny:
+            self.assertEqual(self.decide("Bash", command=command), "deny", command)
+        for command in allow:
+            self.assertEqual(self.decide("Bash", command=command), "allow", command)
+
+    def test_codex_apply_patch(self):
+        patch = "*** Begin Patch\n*** Update File: .env\n@@\n-A\n+B\n*** End Patch"
+        self.assertEqual(self.decide("apply_patch", command=patch), "deny")
+        patch = "*** Begin Patch\n*** Add File: src/app.py\n+print(1)\n*** End Patch"
+        self.assertEqual(self.decide("apply_patch", command=patch), "allow")
+
+    def test_registry_and_config_globs(self):
+        with open(self.path("notes.txt"), "w") as f:
+            f.write("x")
+        with open(os.path.join(self.dir, "protected"), "w") as f:
+            f.write(os.path.realpath(self.path("notes.txt")) + "\n")
+        with open(self.config, "w") as f:
+            f.write("[guard]\nprotect = *.secret\nallow = .env\n")
+        with open(self.path("db.secret"), "w") as f:
+            f.write("x")
+        self.assertEqual(self.decide("Read", file_path="notes.txt"), "deny")
+        self.assertEqual(self.decide("Read", file_path="db.secret"), "deny")
+        self.assertEqual(self.decide("Read", file_path=".env"), "allow")
+
+    def test_bad_input_never_blocks(self):
+        r = subprocess.run([sys.executable, CLI, "guard"], input="not json", env=self.env, capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+
+
+class Install(Base):
+    def test_install_is_idempotent_and_uninstall_reverts(self):
+        claude, codex = self.path(".claude"), self.path(".codex")
+        os.makedirs(claude)
+        os.makedirs(codex)
+        other = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "mine"}]}]}}
+        with open(os.path.join(claude, "settings.json"), "w") as f:
+            json.dump(other, f)
+        self.env["SHELL"] = "/bin/zsh"
+        for _ in range(2):
+            r = self.run_cli("install", "--yes")
+            self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(claude, "settings.json")) as f:
+            groups = json.load(f)["hooks"]["PreToolUse"]
+        self.assertEqual([g["hooks"][0]["command"] for g in groups][0], "mine")
+        self.assertEqual(len(groups), 2)
+        self.assertTrue(groups[1]["hooks"][0]["command"].endswith("secret-drop guard"))
+        with open(os.path.join(codex, "hooks.json")) as f:
+            self.assertEqual(json.load(f)["hooks"]["PreToolUse"][0]["matcher"], "Bash|apply_patch")
+        for link in (".local/bin/secret-drop", ".claude/skills/secret-drop", ".codex/skills/secret-drop"):
+            self.assertTrue(os.path.islink(self.path(link)), link)
+        self.assertTrue(os.path.exists(self.path(".claude/skills/secret-drop/SKILL.md")))
+        self.assertEqual(self.read(".zshrc").count(".local/bin"), 1)
+
+        self.run_cli("uninstall")
+        with open(os.path.join(claude, "settings.json")) as f:
+            self.assertEqual(json.load(f), other)
+        self.assertFalse(os.path.lexists(self.path(".claude/skills/secret-drop")))
+
+    def test_install_asks_first(self):
+        r = subprocess.run([sys.executable, CLI, "install"], input="n\n", env=self.env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertFalse(os.path.lexists(self.path(".local/bin/secret-drop")))
+
+
+@unittest.skipUnless(sys.platform == "darwin" and os.environ.get("SECRET_DROP_TEST_KEYCHAIN") == "1",
+                     "set SECRET_DROP_TEST_KEYCHAIN=1 on macOS to write to the login keychain")
+class KeychainReferences(Base):
+    SERVICE = "secret-drop test refs"
+
+    def tearDown(self):
+        subprocess.run(["security", "delete-generic-password", "-s", self.SERVICE, "-a", "API_TOKEN"], capture_output=True)
+        super().tearDown()
+
+    def test_ref_file_then_run(self):
+        self.env["HOME"] = os.environ["HOME"]
+        env = self.path(".env")
+        r = self.run_cli("ask", "API_TOKEN", f"keychain:{self.SERVICE}", "--ref", env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.read(".env"), f"API_TOKEN=keychain:{self.SERVICE}\n")
+        r = self.run_cli("run", "-f", env, "--", "sh", "-c", 'echo "got $API_TOKEN"; printf %s "$API_TOKEN" | wc -c')
+        self.assertIn("got [redacted:API_TOKEN]", r.stdout)
+        self.assertIn(str(len(VALUE)), r.stdout)
+
+
+@unittest.skipUnless(sys.platform == "darwin" and os.environ.get("SECRET_DROP_TEST_CLIPBOARD") == "1",
+                     "set SECRET_DROP_TEST_CLIPBOARD=1 on macOS to touch the real clipboard")
+class Clipboard(Base):
+    def test_clipboard_is_cleared_after_save(self):
+        saved = subprocess.run(["pbpaste"], capture_output=True).stdout
+        try:
+            subprocess.run(["pbcopy"], input=VALUE.encode())
+            r = self.run_cli("ask", "KEY", f"file:{self.path('env')}")
+            self.assertIn("clipboard cleared", r.stdout)
+            self.assertEqual(subprocess.run(["pbpaste"], capture_output=True).stdout, b"")
+        finally:
+            subprocess.run(["pbcopy"], input=saved)
 
 
 if __name__ == "__main__":
