@@ -2,7 +2,7 @@
 
 **Give your AI agent API keys without ever pasting them into the chat, and stop it from reading them back.**
 
-[Türkçe](README.tr.md)
+🇬🇧 **English** · 🇹🇷 [Türkçe](README.tr.md)
 
 ![Demo: the agent asks for a key, a native dialog opens, the key goes to the Keychain, the agent is blocked from reading it and the value is scrubbed from output](docs/demo-en.gif)
 

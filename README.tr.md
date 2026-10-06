@@ -2,7 +2,7 @@
 
 **AI ajanına API anahtarlarını sohbete yapıştırmadan ver; geri okumasını da engelle.**
 
-[English](README.md)
+🇬🇧 [English](README.md) · 🇹🇷 **Türkçe**
 
 ![Demo: ajan anahtar ister, yerel pencere açılır, anahtar Keychain'e gider, ajanın okuması engellenir ve değer çıktıdan temizlenir](docs/demo-tr.gif)
 
