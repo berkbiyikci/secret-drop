@@ -1,0 +1,18 @@
+# Copy to ~/.config/secret-drop/config
+
+[settings]
+# en or tr (defaults to your locale)
+lang = en
+# seconds before the dialog gives up
+timeout = 600
+
+# `secret-drop ask NAME @prod` writes to this server and restarts the app
+[target.prod]
+target = ssh:deploy@app.example.com:/srv/app/.env
+then = ssh deploy@app.example.com sudo systemctl restart app
+
+[target.local]
+target = file:~/projects/app/.env
+
+[target.mac]
+target = keychain:my-scripts
