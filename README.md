@@ -72,11 +72,13 @@ git clone https://github.com/berkbiyikci/secret-drop.git ~/.secret-drop && ~/.se
 `install.sh` lists every change before making it and asks first:
 
 - it links `secret-drop` into `~/.local/bin` (and adds that folder to your `PATH` if needed);
-- for Claude Code and Codex, whichever you have, it links the agent skill and adds the guard hook
-  (your existing settings are kept and backed up).
+- for Claude Code and Codex, whichever you have, it links the agent skill and adds the guard hook.
+  Your other hooks and settings are kept, the original file is backed up once, and a settings file
+  that isn't valid JSON stops the install before anything changes.
 
 Restart your agent afterwards. In Codex, open `/hooks` once and trust the secret-drop guard.
-`secret-drop uninstall` removes everything again. The first time the dialog opens, macOS asks whether
+`secret-drop uninstall` removes the links and the guard hook; it leaves the PATH line, the backups and
+`~/.config/secret-drop` in place. The first time the dialog opens, macOS asks whether
 your terminal (or the app running your agent) may control **System Events**; allow it, because that
 is how the dialog comes to the front.
 
@@ -109,13 +111,14 @@ secret-drop ask NAME TARGET ["hint shown in the dialog"] [--ref FILE] [--then "c
 |---|---|
 | `keychain:<service>` | Stores the value in the macOS login keychain (service `<service>`, account `NAME`). With `--ref .env`, also writes `NAME=keychain:<service>` to `.env`. **Recommended.** |
 | `file:<path>` (or just a path) | Sets `NAME=value` in an env file: mode `600`, atomic write, added to `.gitignore`. It refuses files that git already tracks. |
-| `ssh:<host>:<path>` | The same on a remote host. The value travels over ssh's stdin, never on the command line. Add `--then "ssh <host> sudo systemctl restart app"` to restart the service. |
+| `ssh:<host>:<path>` | The same on a remote host. The value travels over ssh's stdin, never on the command line. A symlinked env file is followed and an existing file keeps its mode and group; a new one is `600`. Add `--then "ssh <host> sudo systemctl restart app"` to restart the service. |
 | `exec:<command>` | Pipes the value into any command, with the name in `$SECRET_DROP_NAME`, e.g. `exec:gh secret set "$SECRET_DROP_NAME"`. The command's stdout is discarded. |
 | `@<name>` | A destination from the config file (see below). |
 
 `NAME` must look like an environment variable. The dialog closes on its own after 10 minutes. Exit
-codes: `0` saved, `1` cancelled, `2` bad usage, `3` no dialog could open (e.g. inside a sandbox). On
-success it prints one line, and clears the clipboard if it still holds the value:
+codes: `0` saved, `1` cancelled or timed out, `2` bad usage, `3` no dialog could open (e.g. inside a
+sandbox), `4` anything else failed. On success it prints one line, and clears the clipboard if it
+still holds the value:
 
 ```
 STRIPE_SECRET_KEY → keychain:myapp, reference in .env written (length 107, clipboard cleared)
@@ -129,10 +132,13 @@ secret-drop run -f .env [-f more.env] -- command [args...]
 
 Loads `KEY=value` lines literally (never as shell code), resolves `keychain:` references, and starts
 the command with them in its environment. Its stdout and stderr are streamed through a scrubber that
-replaces every secret value, including its base64 and URL-encoded forms, with
-`[redacted:NAME]`. It also catches well-known key shapes it was never told about: AWS, GitHub, GitLab,
-Slack, Google, OpenAI, Anthropic, Stripe, JWTs and private keys. Values that don't look secret (like
-`PORT=3000`) are left alone. The exit code is passed through.
+replaces every secret value, including its URL-encoded and base64 forms (at any position, so
+`user:KEY` in a Basic-auth header is caught too), with `[redacted:NAME]`. A value split across two
+writes is held back until it can be checked. It also catches well-known key shapes it was never told
+about: AWS access key IDs, GitHub, GitLab, Slack, Google, OpenAI, Anthropic, Stripe, JWTs and private
+key blocks. Values from the keychain or from files secret-drop wrote are always scrubbed; elsewhere,
+only clear configuration (numbers, booleans, words like `production`, plain URLs) is left alone. The
+exit code is passed through.
 
 ### `guard`: stop the agent from reading secrets
 
@@ -140,13 +146,18 @@ Slack, Google, OpenAI, Anthropic, Stripe, JWTs and private keys. Values that don
 denials apply even in bypass-permissions mode. The guard blocks:
 
 - reading, grepping or editing secret files: `.env`, `.env.*`, `*.env`, `.envrc`, `.netrc`, `.npmrc`,
-  `credentials`, private keys, and every file secret-drop has written to;
-- shell commands that touch those files (`cat .env`, `cp .env /tmp/x`, `$(cat .env)`…) or read the
-  keychain (`security find-generic-password -w`, `dump-keychain -d`).
+  `credentials`, private keys, and every file secret-drop has written to (also through symlinks or a
+  different letter case);
+- shell commands that read those files, wherever the name appears: `cat .env`, `cd api && head .env`,
+  `bash -c '…'`, `python3 -c "open('.env')"`, `$(cat .env)`, `git add .env`, a recursive `grep` over a
+  folder that holds them, or what `secret-drop run` and `--then` would execute;
+- reading the keychain (`security find-generic-password -w`, `dump-keychain -d`).
 
-It deliberately allows `.env.example` and friends, files that hold only `keychain:` references,
-`secret-drop` itself, and harmless commands like `ls` or `cp .env.example .env`. When it blocks
-something, it tells the agent what to do instead. Tune it in the config file under `[guard]`.
+It deliberately allows `.env.example` and friends, files that hold only `keychain:` references and
+plain configuration, and everyday commands that don't print a secret: `ls`, `[ -f .env ]`,
+`echo .env >> .gitignore`, `git rm --cached .env`, `git commit -m "…"`, `ssh -i`, `docker compose
+--env-file`, `cp .env.example .env`. When it blocks something, it tells the agent what to do instead.
+A broken config never switches it off. Tune it in the config file under `[guard]`.
 
 ### `list` and `targets`
 
@@ -213,8 +224,8 @@ it).
 **What it does not protect**
 
 - **A determined agent or malware running as you.** The guard covers the common routes, not every
-  possible one (a script that copies a file first, for example). It is a guardrail against mistakes,
-  not a sandbox.
+  possible one (a script written to disk and run later, `find … | xargs cat`, an MCP tool). It is a
+  guardrail against mistakes, not a sandbox.
 - **Anyone with access to your unlocked Mac.** Keychain items written by `security` can be read by
   other `security` calls without a prompt.
 - **Clipboard history apps,** which may have already saved the paste before it was cleared.
@@ -229,7 +240,7 @@ is macOS only.
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests                              # 45 tests, no GUI needed
+python3 -m unittest discover -s tests                              # 63 tests, no GUI needed
 SECRET_DROP_TEST_KEYCHAIN=1 python3 -m unittest discover -s tests  # also uses the login keychain, then cleans up
 python3 docs/make_screenshots.py                                   # regenerate the images in docs/
 ```
@@ -237,8 +248,11 @@ python3 docs/make_screenshots.py                                   # regenerate 
 The tests replace the dialog with `SECRET_DROP_PROMPTER`, put a fake `ssh` on `PATH` (and check that
 the value never appears in its argv), run the OAuth flow against a local fake token endpoint that
 verifies PKCE, feed the guard real hook events, and install into a throwaway `HOME`. Before release,
-the skill and the guard were also checked in real Claude Code sessions: the agent picked
-`keychain: --ref .env` on its own, and every attempt to read the key was blocked.
+an independent review tried to break the guard, the scrubber and the installer; every finding is now
+a regression test (`ReviewRegressions`). The skill and the guard were also checked in real Claude
+Code sessions: the agent picked `keychain: --ref .env` on its own, and every attempt to read the key
+was blocked. The Codex hook follows Codex's documented event format but has not yet been tried in a
+live Codex session.
 
 **How the images were made.** `docs/make_screenshots.py` opens the real dialog prefilled with a fake
 value and captures that one window. It renders the terminal images from real CLI output produced with

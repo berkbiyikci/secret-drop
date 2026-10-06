@@ -72,10 +72,12 @@ git clone https://github.com/berkbiyikci/secret-drop.git ~/.secret-drop && ~/.se
 
 - `secret-drop`'u `~/.local/bin`'e bağlar (gerekirse bu klasörü `PATH`'ine ekler);
 - Claude Code ve Codex'ten hangileri kuruluysa onlara ajan skill'ini bağlar ve guard hook'u ekler.
-  Mevcut ayarların korunur ve yedeklenir.
+  Diğer hook'ların ve ayarların korunur, orijinal dosya bir kez yedeklenir. Geçerli JSON olmayan bir
+  ayar dosyası, hiçbir şey değişmeden kurulumu durdurur.
 
 Ardından ajanını yeniden başlat. Codex'te bir kez `/hooks` ekranını açıp secret-drop guard'a güven.
-`secret-drop uninstall` her şeyi geri alır. Pencere ilk açıldığında macOS, terminalinin (ya da ajanı
+`secret-drop uninstall` bağlantıları ve guard hook'u kaldırır. PATH satırı, yedekler ve
+`~/.config/secret-drop` yerinde kalır. Pencere ilk açıldığında macOS, terminalinin (ya da ajanı
 çalıştıran uygulamanın) **System Events**'i kontrol etmesine izin verip vermeyeceğini sorar. İzin ver;
 pencere bu sayede öne gelir.
 
@@ -108,12 +110,13 @@ secret-drop ask AD HEDEF ["pencerede görünen ipucu"] [--ref DOSYA] [--then "ko
 |---|---|
 | `keychain:<servis>` | Değeri macOS giriş anahtar zincirine yazar (servis `<servis>`, hesap `AD`). `--ref .env` verilirse `.env`'ye `AD=keychain:<servis>` de yazar. **Önerilen.** |
 | `file:<yol>` (ya da sadece yol) | Bir env dosyasında `AD=değer` satırını yazar: izin `600`, atomik yazma, `.gitignore`'a eklenir. Git'in zaten izlediği dosyaları reddeder. |
-| `ssh:<host>:<yol>` | Aynısını uzak makinede yapar. Değer ssh'e stdin'den gider, komut satırına hiç girmez. Servisi yeniden başlatmak için `--then "ssh <host> sudo systemctl restart app"` ekle. |
+| `ssh:<host>:<yol>` | Aynısını uzak makinede yapar. Değer ssh'e stdin'den gider, komut satırına hiç girmez. Symlink'li bir env dosyası takip edilir, var olan dosya iznini ve grubunu korur; yeni dosya `600` olur. Servisi yeniden başlatmak için `--then "ssh <host> sudo systemctl restart app"` ekle. |
 | `exec:<komut>` | Değeri herhangi bir komuta stdin'den verir, ad `$SECRET_DROP_NAME` içinde olur. Ör. `exec:gh secret set "$SECRET_DROP_NAME"`. Komutun stdout'u atılır. |
 | `@<ad>` | Config dosyasında tanımlı bir hedef (aşağıda). |
 
 `AD` bir ortam değişkeni gibi olmalı. Pencere 10 dakika sonra kendiliğinden kapanır. Çıkış kodları:
-`0` kaydedildi, `1` vazgeçildi, `2` hatalı kullanım, `3` pencere açılamadı (ör. sandbox içinde).
+`0` kaydedildi, `1` vazgeçildi ya da süre doldu, `2` hatalı kullanım, `3` pencere açılamadı (ör. sandbox
+içinde), `4` başka bir şey ters gitti.
 Başarılı olunca tek satır yazar; pano hâlâ değeri tutuyorsa panoyu da temizler:
 
 ```
@@ -128,10 +131,15 @@ secret-drop run -f .env [-f diger.env] -- komut [argümanlar...]
 
 `AD=değer` satırlarını harfiyen okur; shell kodu olarak asla çalıştırmaz. `keychain:` referanslarını
 çözer ve komutu bu değerler ortamındayken başlatır. Komutun stdout ve stderr çıktıları bir temizleyiciden
-geçer: her anahtar değeri, base64 ve URL-encoded halleri dahil, `[redacted:AD]` ile değiştirilir.
-Kendisine hiç söylenmemiş bilinen anahtar biçimlerini de yakalar: AWS, GitHub, GitLab, Slack, Google,
-OpenAI, Anthropic, Stripe, JWT ve özel anahtarlar. Gizli görünmeyen değerlere (`PORT=3000` gibi)
-dokunulmaz. Komutun çıkış kodu aynen döner.
+geçer: her anahtar değeri, URL-encoded ve base64 halleri dahil, `[redacted:AD]` ile değiştirilir.
+Base64'te konumu fark etmez; Basic-auth başlığındaki `user:ANAHTAR` da yakalanır. İki parçaya bölünerek
+yazılan bir değer, kontrol edilebilene kadar bekletilir.
+
+Kendisine hiç söylenmemiş bilinen anahtar biçimlerini de yakalar: AWS access key ID'leri, GitHub, GitLab,
+Slack, Google, OpenAI, Anthropic, Stripe, JWT ve özel anahtar blokları. Anahtar Zinciri'nden ya da
+secret-drop'un yazdığı dosyalardan gelen değerler her zaman temizlenir. Diğerlerinde yalnızca açıkça
+yapılandırma olan değerlere (sayılar, true/false, `production` gibi kelimeler, düz URL'ler) dokunulmaz.
+Komutun çıkış kodu aynen döner.
 
 ### `guard`: ajanın anahtarları okumasını engelle
 
@@ -139,14 +147,25 @@ dokunulmaz. Komutun çıkış kodu aynen döner.
 engellemeleri bypass izin modunda bile geçerlidir. Guard şunları engeller:
 
 - gizli dosyaları okumayı, içinde aramayı ya da düzenlemeyi: `.env`, `.env.*`, `*.env`, `.envrc`,
-  `.netrc`, `.npmrc`, `credentials`, özel anahtarlar ve secret-drop'un yazdığı her dosya;
-- bu dosyalara dokunan (`cat .env`, `cp .env /tmp/x`, `$(cat .env)`…) ya da Anahtar Zinciri'ni okuyan
-  (`security find-generic-password -w`, `dump-keychain -d`) shell komutlarını.
+  `.netrc`, `.npmrc`, `credentials`, özel anahtarlar ve secret-drop'un yazdığı her dosya (symlink
+  üzerinden ya da farklı harf büyüklüğüyle erişilse bile);
+- bu dosyaları okuyan shell komutlarını, ad nerede geçerse geçsin:
+  - doğrudan okuma: `cat .env`, `cd api && head .env`
+  - başka bir yorumlayıcı içinden: `bash -c '…'`, `python3 -c "open('.env')"`, `$(cat .env)`
+  - commit'e sokma: `git add .env`
+  - bu dosyaları içeren bir klasörde özyinelemeli `grep`
+  - `secret-drop run` ve `--then`'in çalıştıracağı komutlar;
+- Anahtar Zinciri'ni okumayı (`security find-generic-password -w`, `dump-keychain -d`).
 
-Şunlara bilerek izin verir: `.env.example` ve benzerleri, yalnızca `keychain:` referansı tutan
-dosyalar, `secret-drop`'un kendisi ve `ls` ya da `cp .env.example .env` gibi zararsız komutlar. Bir
-şeyi engellediğinde ajana onun yerine ne yapması gerektiğini söyler. Config dosyasında `[guard]`
-altından ayarlanır.
+Şunlara bilerek izin verir:
+- `.env.example` ve benzerleri;
+- yalnızca `keychain:` referansı ve düz yapılandırma tutan dosyalar;
+- anahtar yazdırmayan günlük komutlar: `ls`, `[ -f .env ]`, `echo .env >> .gitignore`,
+  `git rm --cached .env`, `git commit -m "…"`, `ssh -i`, `docker compose --env-file`,
+  `cp .env.example .env`.
+
+Bir şeyi engellediğinde ajana onun yerine ne yapması gerektiğini söyler. Bozuk bir config onu asla
+kapatmaz. Config dosyasında `[guard]` altından ayarlanır.
 
 ### `list` ve `targets`
 
@@ -213,8 +232,8 @@ kullanıyor.
 **Neyi korumaz**
 
 - **Senin kullanıcınla çalışan kararlı bir ajanı ya da zararlı yazılımı.** Guard yaygın yolları kapatır,
-  olası her yolu değil (örneğin önce dosyayı kopyalayan bir script). Hatalara karşı bir korkuluktur,
-  sandbox değildir.
+  olası her yolu değil: diske yazılıp sonra çalıştırılan bir script, `find … | xargs cat` ya da bir MCP
+  aracı bunlara örnek. Hatalara karşı bir korkuluktur, sandbox değildir.
 - **Kilidi açık Mac'ine erişimi olan birini.** `security` ile yazılan Anahtar Zinciri kayıtları başka
   `security` çağrılarıyla onay sorulmadan okunabilir.
 - **Pano geçmişi tutan uygulamaları.** Bunlar yapıştırılan değeri pano temizlenmeden önce kaydetmiş
@@ -230,7 +249,7 @@ macOS'ta var.
 ## Geliştirme
 
 ```bash
-python3 -m unittest discover -s tests                              # 45 test, GUI gerekmez
+python3 -m unittest discover -s tests                              # 63 test, GUI gerekmez
 SECRET_DROP_TEST_KEYCHAIN=1 python3 -m unittest discover -s tests  # giriş anahtar zincirini de kullanır, sonra temizler
 python3 docs/make_screenshots.py                                   # docs/ görsellerini yeniden üretir
 ```
@@ -242,8 +261,14 @@ Testlerde:
 - guard'a gerçek hook olayları verilir;
 - kurulum geçici bir `HOME` içine yapılır.
 
-Yayından önce skill ve guard gerçek Claude Code oturumlarında da denendi. Ajan
-`keychain: --ref .env` yolunu kendisi seçti; anahtarı okumaya yönelik her denemesi engellendi.
+Yayından önce bağımsız bir inceleme guard'ı, temizleyiciyi ve kurulumu kırmaya çalıştı. Bulduğu her
+sorun artık bir regresyon testi (`ReviewRegressions`).
+
+Skill ve guard gerçek Claude Code oturumlarında da denendi. Ajan `keychain: --ref .env` yolunu kendisi
+seçti; anahtarı okumaya yönelik her denemesi engellendi.
+
+Codex hook'u, Codex'in dokümante edilmiş olay formatını izliyor; ama henüz canlı bir Codex oturumunda
+denenmedi.
 
 **Görseller nasıl üretildi?** `docs/make_screenshots.py` gerçek pencereyi sahte bir değerle önceden
 doldurulmuş halde açar ve yalnızca o pencereyi yakalar. Terminal görsellerini sahte değerlerle alınmış
