@@ -58,9 +58,14 @@ laptop.
   model, there is no guard, and it isn't open source.
 - **vs 1Password CLI:** the right call if your team already pays for it, but it needs the app and a
   subscription, the agent can't collect a new secret from you, and it can't deliver to your server.
+- **vs [secure-secret-drop](https://github.com/moeadham/secure-secret-drop) and
+  [Rendiere/secretdrop](https://github.com/Rendiere/secretdrop):** the agent hands you a one-time web
+  link (over a Cloudflare tunnel or Tailscale) and the value lands in a plaintext file. That covers
+  the ask step only: no keychain, no guard, no scrubbing, no delivery beyond that file.
 
-Where others are ahead: keyward and 1Password run on Windows and Linux, secret-cli has a larger test
-suite, and 1Password syncs across a team. The comparison was made on 2026-10-06 from each project's
+Where others are ahead: those two link-based tools also work when the agent runs on a remote machine
+and you're on your phone (secret-drop's dialog needs your Mac's screen), keyward and 1Password run on
+Windows and Linux, secret-cli has a larger test suite, and 1Password syncs across a team. The comparison was made on 2026-10-06 from each project's
 own README and source; corrections are welcome.
 
 ## Install
@@ -258,6 +263,13 @@ live Codex session.
 value and captures that one window. It renders the terminal images from real CLI output produced with
 fake values, so no real key, host or account appears anywhere. The demo was rendered with
 [Remotion](https://www.remotion.dev); its music was generated in code.
+
+## Not to be confused with
+
+"Secret drop" is a popular name. These are different projects:
+[bilustek/secretdrop](https://github.com/bilustek/secretdrop) (secretdrop.us, one-time secret sharing
+between people), [SecretDrop.io](https://github.com/Calvin-LL/SecretDrop.io) (public-key encryption in
+the browser), and the agent link tools compared above.
 
 ## License
 

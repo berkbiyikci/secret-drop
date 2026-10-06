@@ -57,9 +57,17 @@ Bu alanda birkaç araç var ve her biri sorunun bir parçasını çözüyor. sec
   veriyor, guard yok ve açık kaynak değil.
 - **1Password CLI'a karşı:** Ekibin zaten ödüyorsa doğru tercih. Ama uygulama ve abonelik gerektiriyor,
   ajan senden yeni bir anahtar toplayamıyor ve sunucuna teslim edemiyor.
+- **[secure-secret-drop](https://github.com/moeadham/secure-secret-drop) ve
+  [Rendiere/secretdrop](https://github.com/Rendiere/secretdrop)'a karşı:** Ajan sana tek seferlik bir web
+  linki veriyor (Cloudflare tüneli ya da Tailscale üzerinden), değer düz metin bir dosyaya yazılıyor. Bu
+  yalnızca sorma adımını karşılıyor: Keychain, guard, temizleme ya da o dosyanın ötesine teslim yok.
 
-Diğerlerinin önde olduğu yerler de var: keyward ve 1Password Windows ve Linux'ta çalışıyor, secret-cli'ın
-test paketi daha büyük, 1Password ekipler arasında senkronize ediyor. Karşılaştırma 2026-10-06'da her
+Diğerlerinin önde olduğu yerler de var:
+- O iki link tabanlı araç, ajan uzak bir makinede çalışırken ve sen telefondayken de işe yarıyor;
+  secret-drop'un penceresi ise Mac'inin ekranına ihtiyaç duyuyor.
+- keyward ve 1Password Windows ve Linux'ta çalışıyor.
+- secret-cli'ın test paketi daha büyük.
+- 1Password ekipler arasında senkronize ediyor. Karşılaştırma 2026-10-06'da her
 projenin kendi README'si ve kaynak kodu okunarak yapıldı; düzeltmelere açığız.
 
 ## Kurulum
@@ -274,6 +282,14 @@ denenmedi.
 doldurulmuş halde açar ve yalnızca o pencereyi yakalar. Terminal görsellerini sahte değerlerle alınmış
 gerçek CLI çıktısından üretir; bu yüzden hiçbir yerde gerçek bir anahtar, sunucu ya da hesap görünmez.
 Demo [Remotion](https://www.remotion.dev) ile render edildi; müziği kodla üretildi.
+
+## Karıştırmayın
+
+"Secret drop" popüler bir isim. Şunlar farklı projeler:
+- [bilustek/secretdrop](https://github.com/bilustek/secretdrop): secretdrop.us, insanlar arası tek seferlik
+  anahtar paylaşımı.
+- [SecretDrop.io](https://github.com/Calvin-LL/SecretDrop.io): tarayıcıda açık anahtarlı şifreleme.
+- Yukarıda karşılaştırılan, ajanlara link veren araçlar.
 
 ## Lisans
 
