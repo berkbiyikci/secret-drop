@@ -1,208 +1,254 @@
 # secret-drop
 
-**Gizli anahtarları AI sohbetine yapıştırmadan araçlarına teslim et.**
+**AI ajanına API anahtarlarını sohbete yapıştırmadan ver; geri okumasını da engelle.**
 
 [English](README.md)
 
-![Demo: ajan anahtar ister, yerel pencere açılır, anahtar hedefe yazılır ve sohbette hiç görünmez](docs/demo-tr.gif)
+![Demo: ajan anahtar ister, yerel pencere açılır, anahtar Keychain'e gider, ajanın okuması engellenir ve değer çıktıdan temizlenir](docs/demo-tr.gif)
 
-## Neden var?
+Claude Code ve Codex gibi kodlama ajanları sürekli gizli anahtara ihtiyaç duyar: bir Stripe anahtarı,
+bir veritabanı şifresi, bir OAuth refresh token. Bugün bu çoğunlukla anahtarı sohbete yapıştırmak
+demek. Anahtar o anda sohbet kaydına, modelin bağlamına ve kullandığın araçların tuttuğu loglara girer.
 
-Claude Code ve Codex gibi kodlama ajanları bir işi bitirmek için sık sık API anahtarı, OAuth client
-secret ya da refresh token ister. Genelde akış şöyle ilerler: ajan "şu komutu çalıştır, anahtarı
-yapıştır" der ve anahtar sohbete yapıştırılır. O andan sonra anahtar sohbet kaydında, ajanın
-bağlamında ve sağlayıcının ya da kendi araçlarının tuttuğu loglarda durur.
+secret-drop bütün döngüyü tek dosyada ve sıfır bağımlılıkla kapatır:
 
-secret-drop anahtarı sohbetten alıp ekranına taşır. Ajan bir komut çalıştırır, makinende yerel bir
-şifre penceresi açılır, anahtarı oraya yapıştırırsın. Değer doğrudan gitmesi gereken yere yazılır:
-bir env dosyasına, ssh üzerinden bir sunucuya, macOS Anahtar Zinciri'ne ya da kendi komutuna. Ajana
-yalnızca değerin **uzunluğu** söylenir; işin olduğunu anlamak için bu yeterli.
+1. **Sor.** Ajan `secret-drop ask` çalıştırır, ekranında yerel bir pencere açılır. Anahtarı oraya
+   yapıştırırsın; ajan yalnızca uzunluğunu öğrenir.
+2. **Sakla.** Değer macOS Anahtar Zinciri'ne gider ve `.env` dosyasında yalnızca `keychain:myapp` gibi
+   bir referans kalır. İstersen bir env dosyasına, ssh ile bir sunucuya ya da CI'ının secret deposu gibi
+   herhangi bir komuta da gönderebilirsin.
+3. **Kullan.** `secret-drop run -f .env -- npm start` anahtarları komuta verir ve çıktısından temizler.
+4. **Koru.** Claude Code ve Codex için bir hook, ajanın gizli dosyaları ya da Anahtar Zinciri'ni senden
+   habersiz okumasını engeller.
 
 <img src="docs/popup-tr.png" width="520" alt="secret-drop penceresi: kilit ikonu, 'STRIPE_SECRET_KEY değerini yapıştır', ipucu satırı ve gizli alan">
 
+## Neden secret-drop, neden diğerleri değil?
+
+Bu alanda birkaç araç var ve her biri sorunun bir parçasını çözüyor. secret-drop bütün döngüyü
+(sor → sakla → kullan → koru) kapsayan **ve** anahtarı bilgisayarının dışına da teslim eden tek araç.
+
+| | **secret-drop** | [ask-secret](https://github.com/cuentadesanti/ask-secret) | [secret-cli](https://github.com/stevenenen/secret-cli) | [keyward](https://github.com/arturayupov/keyward) | [claude-secrets](https://github.com/vaultry/claude-secrets) | [1Password CLI](https://developer.1password.com/docs/cli/) |
+|---|---|---|---|---|---|---|
+| Ajan yerel pencere açar, sen oraya yapıştırırsın | ✅ | ✅ | ❌ terminale kendin yazarsın | ❌ pencere sadece onay ister | ✅ | ❌ 1Password uygulamasını kullanırsın |
+| Değer hiç komut satırına girmez | ✅ | ✅ | ✅ | ✅ | ⚠️ argüman olarak da verilebilir | ⚠️ dokümanı uyarıyor |
+| Ajan skill'i | ✅ Claude Code + Codex | ✅ | ❌ | ❌ | ❌ | ✅ beta |
+| Guard hook ajanın okumasını engeller | ✅ Claude Code + Codex | ❌ | ✅ sadece Claude Code | ❌ | ❌ | ❌ |
+| `run` ve çıktı temizleme | ✅ düz, base64, URL-encoded + bilinen anahtar biçimleri | ❌ temizleme yok | ✅ | ❌ | ❌ temizleme yok | ✅ maskeleme |
+| `.env` değer değil referans tutar | ✅ `keychain:` | ❌ düz metin | ❌ | ❌ düz metin | ✅ `secret://` | ✅ `op://` |
+| ssh ile sunucuya ya da CI'a teslim | ✅ | ❌ | ❌ | ❌ | ❌ | ⚠️ AWS senkronu, beta |
+| Ardından komut çalıştırır (servisi yeniden başlatır) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Google OAuth refresh token akışı | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Yapıştırmadan sonra panoyu temizler | ✅ | ❌ | ❌ | ❌ | ❌ | ? |
+| Kurulum | git clone + `install.sh`, Python 3.9 stdlib (macOS'la gelir) | git clone, zsh | git clone, bash + python3 | Go binary | npm, Node 18+ | uygulama + ücretli abonelik |
+| Platformlar | macOS (Linux penceresi deneysel) | macOS | macOS | macOS, Linux, Windows | macOS | macOS, Linux, Windows |
+| Lisans | MIT | MIT | MIT | MIT | kaynağı açık, OSI değil | kapalı |
+
+**Her birine karşı tek cümleyle:**
+
+- **ask-secret'a karşı:** Aynı pencere fikri. Ama `.env` düz metin kalıyor, ajanın `cat .env`
+  çalıştırmasını engelleyen bir şey yok ve çıktı temizlenmiyor.
+- **secret-cli'a karşı:** Güçlü bir guard ve temizleyici var. Ama anahtarı terminale kendin yazıyorsun
+  (ajan senden isteyemiyor), yalnızca Claude Code'u koruyor ve anahtarlar Anahtar Zinciri'nden dışarı
+  çıkamıyor.
+- **keyward'a karşı:** Çok platformlu, şifreli bir kasa. Ama anahtarları kendin içeri aktarıyorsun,
+  enjekte edilen değerler düz metin `.env`'ye yazılıyor; guard da temizleme de yok.
+- **claude-secrets'a karşı:** Referans ve pencere var. Ama MCP'deki `get_secret` düz metni modele
+  veriyor, guard yok ve açık kaynak değil.
+- **1Password CLI'a karşı:** Ekibin zaten ödüyorsa doğru tercih. Ama uygulama ve abonelik gerektiriyor,
+  ajan senden yeni bir anahtar toplayamıyor ve sunucuna teslim edemiyor.
+
+Diğerlerinin önde olduğu yerler de var: keyward ve 1Password Windows ve Linux'ta çalışıyor, secret-cli'ın
+test paketi daha büyük, 1Password ekipler arasında senkronize ediyor. Karşılaştırma 2026-10-06'da her
+projenin kendi README'si ve kaynak kodu okunarak yapıldı; düzeltmelere açığız.
+
 ## Kurulum
 
-Paket yöneticisi de `curl | sh` da yok. Tek bir Python dosyası; standart kütüphane dışında bağımlılığı
-yok (Python 3.9+, macOS'la birlikte geliyor).
-
 ```bash
-git clone https://github.com/berkbiyikci/secret-drop.git ~/tools/secret-drop
-echo 'export PATH="$HOME/tools/secret-drop:$PATH"' >> ~/.zshrc
-exec zsh
-secret-drop --version
+git clone https://github.com/berkbiyikci/secret-drop.git ~/.secret-drop && ~/.secret-drop/install.sh
 ```
 
-Pencere ilk açıldığında macOS, terminalinin (ya da ajanı çalıştıran uygulamanın) **System Events**'i
-kontrol etmesine izin verip vermeyeceğini sorar. İzin ver; pencere bu sayede öne gelir.
+`install.sh` her değişikliği önce listeler, sonra onay ister:
 
-Mesajlar sistem diline göre seçilir. Türkçe için `~/.config/secret-drop/config` dosyasına
-`[settings]` altında `lang = tr` yaz ya da `SECRET_DROP_LANG=tr` tanımla.
+- `secret-drop`'u `~/.local/bin`'e bağlar (gerekirse bu klasörü `PATH`'ine ekler);
+- Claude Code ve Codex'ten hangileri kuruluysa onlara ajan skill'ini bağlar ve guard hook'u ekler.
+  Mevcut ayarların korunur ve yedeklenir.
 
-## Kullanım
+Ardından ajanını yeniden başlat. Codex'te bir kez `/hooks` ekranını açıp secret-drop guard'a güven.
+`secret-drop uninstall` her şeyi geri alır. Pencere ilk açıldığında macOS, terminalinin (ya da ajanı
+çalıştıran uygulamanın) **System Events**'i kontrol etmesine izin verip vermeyeceğini sorar. İzin ver;
+pencere bu sayede öne gelir.
+
+## Hızlı başlangıç
+
+Bunları genelde kendin yazmazsın; skill ajanına öğretir. Ama bütün akış şu:
+
+```bash
+# 1. sor: değer Anahtar Zinciri'ne gider, .env okunması güvenli bir referans alır
+secret-drop ask STRIPE_SECRET_KEY keychain:myapp --ref .env "Stripe Paneli → Geliştiriciler → API anahtarları"
+
+# 2. kullan: süreç ortamına verilir, çıktıdan temizlenir
+secret-drop run -f .env -- node app.js
+
+# 3. neler var bak: sadece adlar
+secret-drop list .env
+```
+
+<img src="docs/terminal-tr.svg" alt="Terminal: secret-drop ask Anahtar Zinciri'ne yazar, cat .env yalnızca referansı gösterir, secret-drop run [redacted:STRIPE_SECRET_KEY] yazdırır">
+
+## Komutlar
 
 ### `ask`: tek anahtar, tek hedef
 
 ```bash
-secret-drop ask AD HEDEF ["pencerede görünen ipucu"] [--then "komut"]
+secret-drop ask AD HEDEF ["pencerede görünen ipucu"] [--ref DOSYA] [--then "komut"]
 ```
-
-`AD` bir ortam değişkeni gibi olmalı: `^[A-Z][A-Z0-9_]*$`. Pencere 10 dakika sonra kendiliğinden
-kapanır. Vazgeçersen, süre dolarsa ya da alanı boş gönderirsen hiçbir şey yazılmaz.
 
 | Hedef | Ne olur |
 |---|---|
-| `file:<yol>` | Yerel bir env dosyasında `AD=değer` satırını yazar. Diğer satırlar korunur, yazma atomiktir ve dosyanın izni `600` olur. |
-| `ssh:<host>:<yol>` | Aynısını uzak makinede yapar. Değer ssh'e **stdin**'den gider, komut satırına hiç girmez. `<host>` için `ssh`'in kabul ettiği her şey olur, `~/.ssh/config`'teki takma adlar dahil. |
-| `keychain:<servis>` | macOS giriş anahtar zincirine generic password olarak yazar (servis = `<servis>`, hesap = `AD`). Değer `security -i`'ye stdin'den gider. |
-| `exec:<komut>` | Bir shell komutu çalıştırır; değeri **stdin**'den, adı `$SECRET_DROP_NAME` ortam değişkeninden verir. Komutun stdout'u atılır, böylece değeri ajana geri basamaz. |
+| `keychain:<servis>` | Değeri macOS giriş anahtar zincirine yazar (servis `<servis>`, hesap `AD`). `--ref .env` verilirse `.env`'ye `AD=keychain:<servis>` de yazar. **Önerilen.** |
+| `file:<yol>` (ya da sadece yol) | Bir env dosyasında `AD=değer` satırını yazar: izin `600`, atomik yazma, `.gitignore`'a eklenir. Git'in zaten izlediği dosyaları reddeder. |
+| `ssh:<host>:<yol>` | Aynısını uzak makinede yapar. Değer ssh'e stdin'den gider, komut satırına hiç girmez. Servisi yeniden başlatmak için `--then "ssh <host> sudo systemctl restart app"` ekle. |
+| `exec:<komut>` | Değeri herhangi bir komuta stdin'den verir, ad `$SECRET_DROP_NAME` içinde olur. Ör. `exec:gh secret set "$SECRET_DROP_NAME"`. Komutun stdout'u atılır. |
 | `@<ad>` | Config dosyasında tanımlı bir hedef (aşağıda). |
 
+`AD` bir ortam değişkeni gibi olmalı. Pencere 10 dakika sonra kendiliğinden kapanır. Çıkış kodları:
+`0` kaydedildi, `1` vazgeçildi, `2` hatalı kullanım, `3` pencere açılamadı (ör. sandbox içinde).
+Başarılı olunca tek satır yazar; pano hâlâ değeri tutuyorsa panoyu da temizler:
+
+```
+STRIPE_SECRET_KEY → keychain:myapp, referans .env içinde yazıldı (uzunluk 107, pano temizlendi)
+```
+
+### `run`: anahtarları görmeden kullan
+
 ```bash
-# yerel .env
-secret-drop ask OPENAI_API_KEY file:.env "platform.openai.com → API keys"
-
-# sunucudaki env dosyası, ardından servisi yeniden başlat
-secret-drop ask STRIPE_SECRET_KEY ssh:deploy@app.example.com:/srv/app/.env \
-  "Stripe Paneli → Geliştiriciler → API anahtarları" \
-  --then "ssh deploy@app.example.com sudo systemctl restart app"
-
-# macOS Anahtar Zinciri
-secret-drop ask GITHUB_TOKEN keychain:my-scripts
-
-# stdin okuyan her şey, ör. bir GitHub Actions secret'ı
-secret-drop ask NPM_TOKEN 'exec:gh secret set "$SECRET_DROP_NAME" --repo me/my-lib'
+secret-drop run -f .env [-f diger.env] -- komut [argümanlar...]
 ```
 
-Başarılı olunca `ask` tek satır yazar:
+`AD=değer` satırlarını harfiyen okur; shell kodu olarak asla çalıştırmaz. `keychain:` referanslarını
+çözer ve komutu bu değerler ortamındayken başlatır. Komutun stdout ve stderr çıktıları bir temizleyiciden
+geçer: her anahtar değeri, base64 ve URL-encoded halleri dahil, `[redacted:AD]` ile değiştirilir.
+Kendisine hiç söylenmemiş bilinen anahtar biçimlerini de yakalar: AWS, GitHub, GitLab, Slack, Google,
+OpenAI, Anthropic, Stripe, JWT ve özel anahtarlar. Gizli görünmeyen değerlere (`PORT=3000` gibi)
+dokunulmaz. Komutun çıkış kodu aynen döner.
 
-```
-STRIPE_SECRET_KEY → @prod yazıldı (uzunluk 107)
-```
+### `guard`: ajanın anahtarları okumasını engelle
 
-`--then`, yazma başarılı olduktan sonra çalışır. Değeri hiç görmez; ortamında yalnızca
-`$SECRET_DROP_NAMES` ve `$SECRET_DROP_TARGET` bulunur.
+`install.sh`, `secret-drop guard`'ı Claude Code ve Codex'e `PreToolUse` hook'u olarak kaydeder. Hook'un
+engellemeleri bypass izin modunda bile geçerlidir. Guard şunları engeller:
+
+- gizli dosyaları okumayı, içinde aramayı ya da düzenlemeyi: `.env`, `.env.*`, `*.env`, `.envrc`,
+  `.netrc`, `.npmrc`, `credentials`, özel anahtarlar ve secret-drop'un yazdığı her dosya;
+- bu dosyalara dokunan (`cat .env`, `cp .env /tmp/x`, `$(cat .env)`…) ya da Anahtar Zinciri'ni okuyan
+  (`security find-generic-password -w`, `dump-keychain -d`) shell komutlarını.
+
+Şunlara bilerek izin verir: `.env.example` ve benzerleri, yalnızca `keychain:` referansı tutan
+dosyalar, `secret-drop`'un kendisi ve `ls` ya da `cp .env.example .env` gibi zararsız komutlar. Bir
+şeyi engellediğinde ajana onun yerine ne yapması gerektiğini söyler. Config dosyasında `[guard]`
+altından ayarlanır.
+
+### `list` ve `targets`
+
+`secret-drop list <hedef>` bir dosyadaki, sunucudaki env dosyasındaki ya da bir Anahtar Zinciri
+servisindeki adları yazdırır; değerleri asla. `secret-drop targets` tanımladığın hedefleri listeler.
 
 ### `google-oauth`: kopyala-yapıştırsız refresh token
 
 ```bash
-secret-drop google-oauth ÖNEK CLIENT_ID "SCOPE'LAR" HEDEF [--no-open] [--reuse-secret] [--then "komut"]
+secret-drop google-oauth ÖNEK CLIENT_ID "SCOPE'LAR" HEDEF [--no-open] [--reuse-secret] [--ref DOSYA]
 ```
 
-**"Desktop app" türündeki bir OAuth istemcisi** için Google izin akışının tamamını yürütür:
+**Desktop app** türündeki bir OAuth istemcisi için Google izin akışını yürütür:
 
-1. Client secret'ı pencereden ister. `--reuse-secret` verilirse `ÖNEK_CLIENT_SECRET`'ı hedeften geri
-   okur; yeniden izin alırken işe yarar.
-2. `127.0.0.1` üzerinde rastgele bir portta tek seferlik bir dinleyici açar; `state` kontrolü ve PKCE
-   (S256) kullanır.
-3. İzin ekranını tarayıcıda açar. `--no-open` ile adresi `AUTH_URL <adres>` olarak yazdırır; böylece
-   istediğin Chrome profilinde açabilirsin.
-4. Kodu token'a çevirir ve hedefe `ÖNEK_CLIENT_ID`, `ÖNEK_CLIENT_SECRET` ve `ÖNEK_REFRESH_TOKEN`
-   yazar.
+1. Client secret'ı pencereden ister; `--reuse-secret` verilirse hedeften geri okur.
+2. `127.0.0.1` üzerinde, `state` kontrolü ve PKCE ile bir kez dinler.
+3. İzin ekranını açar. `--no-open` ile `AUTH_URL …` satırını yazdırır; böylece istediğin tarayıcı
+   profilini seçebilirsin.
+4. `ÖNEK_CLIENT_ID`, `ÖNEK_CLIENT_SECRET` ve `ÖNEK_REFRESH_TOKEN` değerlerini saklar.
 
-```bash
-secret-drop google-oauth GMAIL 1234-abc.apps.googleusercontent.com \
-  "https://www.googleapis.com/auth/gmail.readonly" @prod --no-open
-```
+<img src="docs/oauth-tr.svg" alt="secret-drop google-oauth terminal çıktısı">
 
-<img src="docs/terminal-tr.svg" alt="secret-drop ask ve google-oauth terminal çıktısı; yalnızca adlar, hedefler ve uzunluklar görünüyor">
+## Yapılandırma
 
-### Config dosyası ve adlandırılmış hedefler
-
-Config dosyası `~/.config/secret-drop/config` konumunda durur. `$XDG_CONFIG_HOME/secret-drop/config`
-ya da `$SECRET_DROP_CONFIG` ile başka bir yer gösterebilirsin:
+Config dosyası `~/.config/secret-drop/config` konumunda durur; `$SECRET_DROP_CONFIG` ile başka bir yer
+gösterebilirsin:
 
 ```ini
 [settings]
-# en ya da tr; varsayılan sistem dili
-lang = tr
-# pencerenin kaç saniye sonra kapanacağı
-timeout = 600
+lang = tr          ; en ya da tr; varsayılan sistem dili
+timeout = 600      ; pencerenin kaç saniye sonra kapanacağı
 
 [target.prod]
 target = ssh:deploy@app.example.com:/srv/app/.env
 then = ssh deploy@app.example.com sudo systemctl restart app
 
-[target.local]
-target = file:~/projects/app/.env
+[target.myapp]
+target = keychain:myapp
+ref = ~/projects/myapp/.env
+
+[guard]
+protect = *.secret, ~/.vault/*   ; korunacak ek dosyalar
+allow = .env.test                ; guard'ın geçireceği dosyalar
 ```
 
-Bu config ile `secret-drop ask STRIPE_SECRET_KEY @prod` değeri sunucuya yazar ve servisi yeniden
-başlatır. `secret-drop targets` tanımlı hedefleri listeler; ajan da neyin nereye gideceğini buradan
-öğrenir.
-
-| Ortam değişkeni | Anlamı |
-|---|---|
-| `SECRET_DROP_CONFIG` | Config dosyasının yolu. |
-| `SECRET_DROP_LANG` | `en` ya da `tr`. Config'i ve sistem dilini ezer. |
-| `SECRET_DROP_TIMEOUT` | Pencerenin zaman aşımı (saniye). |
-| `SECRET_DROP_PROMPTER` | Pencere yerine kullanılacak, değeri stdout'a basan bir shell komutu. Ortamında `$SECRET_DROP_NAME` ve `$SECRET_DROP_PROMPT` bulunur. Testler bunu kullanıyor; bir şifre yöneticisi CLI'ına da bağlayabilirsin. |
-
-## Ajanına söyle
-
-Bunu `CLAUDE.md`, `AGENTS.md` ya da ajanının sistem talimatına yapıştır:
-
-```markdown
-## Gizli anahtarlar
-- Kullanıcıdan API anahtarını, token'ı, şifreyi ya da client secret'ı sohbete yapıştırmasını asla isteme.
-- Gerekince `secret-drop ask <AD> <hedef> "<nerede bulunur>"` çalıştır. Kullanıcının ekranında bir
-  pencere açılır, değer doğrudan hedefe gider ve sen yalnızca uzunluğunu görürsün.
-- Hedefler: `@<ad>` (listesi için `secret-drop targets`), `file:<yol>`, `ssh:<host>:<yol>`,
-  `keychain:<servis>`, `exec:<komut>`. Ardından servisi yeniden başlatmak için `--then "<komut>"` ekle.
-- Google OAuth refresh token için
-  `secret-drop google-oauth <ÖNEK> <client_id> "<scope'lar>" <hedef>` çalıştır.
-- Bir anahtarı asla geri yazdırma: anahtar tutan dosyalarda `cat`, `grep` ya da `echo` yok. Anahtarlara
-  yalnızca adıyla atıf yap.
-```
+`secret-drop targets` hedefleri gösterir; ajan `@prod` ya da `@myapp`'i kendisi seçebilir. Ortam
+değişkenleri: `SECRET_DROP_CONFIG`, `SECRET_DROP_LANG`, `SECRET_DROP_TIMEOUT` ve
+`SECRET_DROP_PROMPTER`. Sonuncusu, pencere yerine anahtarı yazdıran bir komut tanımlar; testler bunu
+kullanıyor.
 
 ## Güvenlik
 
 **Neyi korur**
 
-- **Sohbet kaydını ve ajanın bağlamını.** Değer hiçbir zaman yazdırılmaz; yalnızca uzunluğu yazdırılır.
-- **Shell geçmişini ve process listesini.** Değer hiçbir zaman komut satırına girmez. `ssh`'e,
-  `security`'ye ve `exec:` komutlarına stdin'den gider; bu yüzden ne `ps`'te ne de `~/.zsh_history`'de
-  görünür.
-- **Diskteki dosyaları.** Env dosyaları yerelde de uzakta da atomik olarak ve `600` izniyle yazılır.
-- **Yapıştırmadan önceki hataları.** Pencere açılmadan önce ad ve hedef doğrulanır, ssh bağlantısı
-  denenir. Böylece kimse anahtarı çıkmaz bir yola yapıştırmaz.
-- **OAuth yönlendirmesini.** Yalnızca loopback'te dinler, `state`'i kontrol eder, PKCE kullanır ve
-  başıboş istekleri yok sayar.
+- **Sohbet kaydını ve modelin bağlamını:** Değerler hiçbir zaman yazdırılmaz; `run` onları çıktıdan da
+  temizler.
+- **Shell geçmişini ve process listesini:** Değerler hiçbir zaman komut satırına girmez. `ssh`'e,
+  `security`'ye ve `exec:` komutlarına stdin'den gider.
+- **Ajanın kazara okumasını:** Guard, Claude Code ve Codex'teki yaygın yolları kapatır. `keychain:`
+  referansları sayesinde `.env` dosyasının kendisi de zararsız hale gelir.
+- **Kazara commit'i:** Gizli dosyalar `.gitignore`'a eklenir; git'in zaten izlediği dosyalara yazmaz.
+- **Panoyu:** Saklanan bir yapıştırmadan sonra pano temizlenir.
 
 **Neyi korumaz**
 
-- **Makinene ya da hedefe zaten erişimi olan birini.** Env dosyaları ve anahtar zinciri, sahibi olan
-  hesap kadar güvenlidir.
-- **Ajanın sonradan hedefi okumasını.** Dosya ya da shell erişimi olan bir ajan yine `cat .env`
-  çalıştırabilir. Yukarıdaki talimat bloğu bir kuraldır, zorlayıcı bir mekanizma değildir. Bu senin
-  için önemliyse ajanının izin kurallarıyla birleştir (ör. `.env` dosyalarını okumayı yasakla).
-- **Panoyu.** Kopyala-yapıştır panodan geçer; pano geçmişi tutan uygulamalar bir kopyasını saklar. Bu
-  uygulamaları hariç tut ya da geçmişi temizle.
-- **Senin yazdığın komutları.** `exec:` ve `--then` ne verirsen onu çalıştırır.
-- **Odağı.** Pencere açılınca klavye odağını alır. O sırada başka bir yere yazıyorsan tuşların gizli
-  alana düşer. Yapıştırmadığın noktalar görürsen vazgeç.
+- **Senin kullanıcınla çalışan kararlı bir ajanı ya da zararlı yazılımı.** Guard yaygın yolları kapatır,
+  olası her yolu değil (örneğin önce dosyayı kopyalayan bir script). Hatalara karşı bir korkuluktur,
+  sandbox değildir.
+- **Kilidi açık Mac'ine erişimi olan birini.** `security` ile yazılan Anahtar Zinciri kayıtları başka
+  `security` çağrılarıyla onay sorulmadan okunabilir.
+- **Pano geçmişi tutan uygulamaları.** Bunlar yapıştırılan değeri pano temizlenmeden önce kaydetmiş
+  olabilir.
+- **Odağı.** Pencere açılınca klavye odağını alır. Yapıştırmadığın noktalar görürsen vazgeç.
 
 ## Platformlar
 
-macOS'ta test edildi. Linux'ta, kuruluysa `zenity` ya da `kdialog` kullanır. Bu yol **deneysel ve test
-edilmedi**; `keychain:` hedefi yalnızca macOS'ta çalışır.
+macOS tam destekli ve test edildi. Linux'ta `ask`, `run`, `list`, `guard` ve dosya ile ssh hedefleri
+çalışır. Pencere `zenity` ya da `kdialog` ile açılır ve bu yol **deneysel**; `keychain:` yalnızca
+macOS'ta var.
 
 ## Geliştirme
 
 ```bash
-python3 -m unittest discover -s tests                            # GUI gerekmez
-SECRET_DROP_TEST_KEYCHAIN=1 python3 -m unittest discover -s tests  # giriş anahtar zincirine de yazar, sonra temizler
-python3 docs/make_screenshots.py                                 # docs/ görsellerini yeniden üretir
+python3 -m unittest discover -s tests                              # 45 test, GUI gerekmez
+SECRET_DROP_TEST_KEYCHAIN=1 python3 -m unittest discover -s tests  # giriş anahtar zincirini de kullanır, sonra temizler
+python3 docs/make_screenshots.py                                   # docs/ görsellerini yeniden üretir
 ```
 
-Testlerde pencerenin yerini `SECRET_DROP_PROMPTER` alır. `PATH`'e sahte bir `ssh` konur; bu `ssh` uzak
-scripti yerelde çalıştırır ve değerin argv'de olmadığını kanıtlamak için argv'sini kaydeder. OAuth
-akışı, PKCE doğrulayıcısını kontrol eden yerel bir sahte token servisine karşı çalışır.
+Testlerde:
+- pencerenin yerini `SECRET_DROP_PROMPTER` alır;
+- `PATH`'e sahte bir `ssh` konur ve değerin argv'sinde hiç görünmediği kontrol edilir;
+- OAuth akışı, PKCE'yi doğrulayan yerel bir sahte token servisine karşı çalışır;
+- guard'a gerçek hook olayları verilir;
+- kurulum geçici bir `HOME` içine yapılır.
 
-**Görseller nasıl üretildi?** `docs/make_screenshots.py` gerçek pencereyi sahte bir değer önceden
-doldurulmuş halde açar ve yalnızca o pencereyi `screencapture -l` ile yakalar. Terminal SVG'lerini
-gerçek CLI çıktısından üretir; bu çıktı aynı sahte `ssh` ve sahte bir Google token servisiyle alınır.
-Bu yüzden hiçbir yerde gerçek bir anahtar, sunucu ya da hesap görünmez. Demo GIF'i
-[Remotion](https://www.remotion.dev) ile render edildi.
+Yayından önce skill ve guard gerçek Claude Code oturumlarında da denendi. Ajan
+`keychain: --ref .env` yolunu kendisi seçti; anahtarı okumaya yönelik her denemesi engellendi.
+
+**Görseller nasıl üretildi?** `docs/make_screenshots.py` gerçek pencereyi sahte bir değerle önceden
+doldurulmuş halde açar ve yalnızca o pencereyi yakalar. Terminal görsellerini sahte değerlerle alınmış
+gerçek CLI çıktısından üretir; bu yüzden hiçbir yerde gerçek bir anahtar, sunucu ya da hesap görünmez.
+Demo [Remotion](https://www.remotion.dev) ile render edildi; müziği kodla üretildi.
 
 ## Lisans
 

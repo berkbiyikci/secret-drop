@@ -4,8 +4,10 @@
     python3 docs/make_screenshots.py
 
 popup-<lang>.png     the real dialog, prefilled with a fake value and captured with `screencapture -l`
-terminal-<lang>.svg  real CLI output: a fake `ssh` runs the remote script locally and a fake
-                     Google token endpoint answers the OAuth code exchange
+terminal-<lang>.svg  real CLI output of ask → keychain + reference, cat .env, run with scrubbing
+                     (a fake value is stored under a throwaway keychain service and deleted again)
+oauth-<lang>.svg     real CLI output of google-oauth: a fake `ssh` runs the remote script locally and
+                     a fake Google token endpoint answers the code exchange
 """
 
 import html
@@ -87,7 +89,37 @@ class FakeGoogle(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def transcript(lang: str) -> list[tuple[str, str]]:
+KEYCHAIN_SERVICE = "secret-drop-screenshot"
+
+
+def keychain_transcript(lang: str) -> list[tuple[str, str]]:
+    """ask → keychain with a reference in .env, then cat .env and run, all for real."""
+    tmp = tempfile.mkdtemp()
+    with open(os.path.join(tmp, "app.js"), "w") as f:
+        f.write('console.log("Stripe client ready, key", process.env.STRIPE_SECRET_KEY)\n')
+    env = {**os.environ, "SECRET_DROP_CONFIG": os.path.join(tmp, "config"), "SECRET_DROP_LANG": lang,
+           "SECRET_DROP_PROMPTER": f"printf %s {FAKE}"}
+    service = KEYCHAIN_SERVICE
+    lines: list[tuple[str, str]] = []
+
+    def run(display: str, argv: list[str]) -> None:
+        lines.append(("cmd", display))
+        out = subprocess.run(argv, cwd=tmp, env=env, capture_output=True, text=True)
+        lines.extend(("out", line) for line in (out.stdout + out.stderr).splitlines())
+
+    try:
+        run(f'secret-drop ask STRIPE_SECRET_KEY keychain:myapp --ref .env "{NOTES[lang]}"',
+            [CLI, "ask", "STRIPE_SECRET_KEY", f"keychain:{service}", "--ref", ".env", NOTES[lang]])
+        run("cat .env", ["cat", ".env"])
+        run("secret-drop run -f .env -- node app.js", [CLI, "run", "-f", ".env", "--", "node", "app.js"])
+    finally:
+        subprocess.run(["security", "delete-generic-password", "-s", service, "-a", "STRIPE_SECRET_KEY"],
+                       capture_output=True)
+    # The throwaway service name is an implementation detail; show the name used in the README.
+    return [(kind, text.replace(service, "myapp")) for kind, text in lines]
+
+
+def oauth_transcript(lang: str) -> list[tuple[str, str]]:
     """Runs the real CLI and returns (kind, line) pairs; kind is 'cmd' or 'out'."""
     tmp = tempfile.mkdtemp()
     bin_dir = os.path.join(tmp, "bin")
@@ -131,8 +163,6 @@ def transcript(lang: str) -> list[tuple[str, str]]:
             lines.append(("out", line))
         proc.wait()
 
-    run(["secret-drop", "ask", "STRIPE_SECRET_KEY", "@prod", f'"{NOTES[lang]}"'],
-        ["ask", "STRIPE_SECRET_KEY", "@prod", NOTES[lang]])
     run(["secret-drop", "google-oauth", "GMAIL", CLIENT_ID, f'"{SCOPE}"', "@prod", "--no-open"],
         ["google-oauth", "GMAIL", CLIENT_ID, SCOPE, "@prod", "--no-open"], consent=True)
     server.shutdown()
@@ -166,7 +196,8 @@ def svg(lines: list[tuple[str, str]], path: str) -> None:
 
 if __name__ == "__main__":
     for lang in ("en", "tr"):
-        svg(transcript(lang), os.path.join(DOCS, f"terminal-{lang}.svg"))
+        svg(keychain_transcript(lang), os.path.join(DOCS, f"terminal-{lang}.svg"))
+        svg(oauth_transcript(lang), os.path.join(DOCS, f"oauth-{lang}.svg"))
         if sys.platform == "darwin" and "--no-popup" not in sys.argv:
             popup(lang)
     print("docs/ updated")

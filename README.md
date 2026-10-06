@@ -1,200 +1,249 @@
 # secret-drop
 
-**Hand secrets to your tools without pasting them into an AI chat.**
+**Give your AI agent API keys without ever pasting them into the chat, and stop it from reading them back.**
 
 [Türkçe](README.tr.md)
 
-![Demo: the agent asks for a key, a native dialog opens, the key is written to its target and never shows up in the chat](docs/demo-en.gif)
+![Demo: the agent asks for a key, a native dialog opens, the key goes to the Keychain, the agent is blocked from reading it and the value is scrubbed from output](docs/demo-en.gif)
 
-## Why
+Coding agents like Claude Code and Codex constantly need secrets: a Stripe key, a database password,
+an OAuth refresh token. Today that usually means pasting the key into the chat, which writes it into
+the transcript, into the model's context and into whatever logs your tooling keeps.
 
-Coding agents like Claude Code and Codex often need an API key, an OAuth client secret or a refresh
-token to finish a task. The usual flow goes like this: the agent says "run this and paste the key",
-and the key ends up pasted into the chat. From that point it lives in the transcript, in the agent's
-context and in whatever logs the provider or your tooling keeps.
+secret-drop closes the whole loop with one file and no dependencies:
 
-secret-drop moves the secret off the chat and onto your screen. The agent runs a command, a native
-password dialog opens on your machine, you paste the key there, and the value is written straight to
-where it belongs: an env file, a server over ssh, the macOS Keychain or a command of your own. The
-agent only gets told the value's **length**, which is enough to confirm it worked.
+1. **Ask.** The agent runs `secret-drop ask`, and a native dialog opens on your screen. You paste the
+   key there; the agent only learns its length.
+2. **Store.** The value goes to the macOS Keychain (your `.env` keeps a reference like
+   `keychain:myapp`), to an env file, to a server over ssh, or into any command, such as your CI's
+   secret store.
+3. **Use.** `secret-drop run -f .env -- npm start` injects the secrets into the command and redacts
+   them from its output.
+4. **Guard.** A hook for Claude Code and Codex blocks the agent from reading secret files or the
+   keychain behind your back.
 
 <img src="docs/popup-en.png" width="520" alt="The secret-drop dialog: a padlock, 'Paste the value for STRIPE_SECRET_KEY', a hint line and a hidden field">
 
+## Why secret-drop and not…
+
+There are several tools in this space, and each one solves a slice of the problem. secret-drop is the
+only one that covers the full loop (ask → store → use → guard) **and** delivers secrets beyond your
+laptop.
+
+| | **secret-drop** | [ask-secret](https://github.com/cuentadesanti/ask-secret) | [secret-cli](https://github.com/stevenenen/secret-cli) | [keyward](https://github.com/arturayupov/keyward) | [claude-secrets](https://github.com/vaultry/claude-secrets) | [1Password CLI](https://developer.1password.com/docs/cli/) |
+|---|---|---|---|---|---|---|
+| Agent opens a native dialog, you paste there | ✅ | ✅ | ❌ you type in a terminal | ❌ dialog only approves | ✅ | ❌ you use the 1Password app |
+| Value never on a command line | ✅ | ✅ | ✅ | ✅ | ⚠️ optional argument | ⚠️ docs warn about it |
+| Agent skill | ✅ Claude Code + Codex | ✅ | ❌ | ❌ | ❌ | ✅ beta |
+| Guard hook blocks the agent from reading secrets | ✅ Claude Code + Codex | ❌ | ✅ Claude Code only | ❌ | ❌ | ❌ |
+| `run` with output scrubbing | ✅ raw, base64, URL-encoded + known key shapes | ❌ no scrubbing | ✅ | ❌ | ❌ no scrubbing | ✅ masking |
+| `.env` holds references, not values | ✅ `keychain:` | ❌ plaintext | ❌ | ❌ plaintext | ✅ `secret://` | ✅ `op://` |
+| Delivers to a server over ssh or to CI | ✅ | ❌ | ❌ | ❌ | ❌ | ⚠️ AWS sync, beta |
+| Runs a command afterwards (restart a service) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Google OAuth refresh-token flow | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Clears the clipboard after the paste | ✅ | ❌ | ❌ | ❌ | ❌ | ? |
+| Install | git clone + `install.sh`, Python 3.9 stdlib (ships with macOS) | git clone, zsh | git clone, bash + python3 | Go binary | npm, Node 18+ | app + paid subscription |
+| Platforms | macOS (Linux dialog experimental) | macOS | macOS | macOS, Linux, Windows | macOS | macOS, Linux, Windows |
+| License | MIT | MIT | MIT | MIT | source-available | proprietary |
+
+**In one line each:**
+
+- **vs ask-secret:** same dialog idea, but its `.env` stays plaintext, nothing stops the agent from
+  running `cat .env`, and output isn't scrubbed.
+- **vs secret-cli:** a strong guard and scrubber, but you type secrets into a terminal yourself (the
+  agent can't ask you), it guards Claude Code only, and secrets never leave your Keychain.
+- **vs keyward:** a cross-platform encrypted vault, but you import keys yourself, injected values land
+  in a plaintext `.env`, and there is no guard or scrubbing.
+- **vs claude-secrets:** references and a dialog, but its MCP `get_secret` hands the plaintext to the
+  model, there is no guard, and it isn't open source.
+- **vs 1Password CLI:** the right call if your team already pays for it, but it needs the app and a
+  subscription, the agent can't collect a new secret from you, and it can't deliver to your server.
+
+Where others are ahead: keyward and 1Password run on Windows and Linux, secret-cli has a larger test
+suite, and 1Password syncs across a team. The comparison was made on 2026-10-06 from each project's
+own README and source; corrections are welcome.
+
 ## Install
 
-No package manager and no `curl | sh`. It is one Python file with no dependencies beyond the standard
-library (Python 3.9+, which ships with macOS).
-
 ```bash
-git clone https://github.com/berkbiyikci/secret-drop.git ~/tools/secret-drop
-echo 'export PATH="$HOME/tools/secret-drop:$PATH"' >> ~/.zshrc
-exec zsh
-secret-drop --version
+git clone https://github.com/berkbiyikci/secret-drop.git ~/.secret-drop && ~/.secret-drop/install.sh
 ```
 
-The first time the dialog opens, macOS asks whether your terminal (or the app running your agent) may
-control **System Events**. Allow it; that is how the dialog comes to the front.
+`install.sh` lists every change before making it and asks first:
 
-## Usage
+- it links `secret-drop` into `~/.local/bin` (and adds that folder to your `PATH` if needed);
+- for Claude Code and Codex, whichever you have, it links the agent skill and adds the guard hook
+  (your existing settings are kept and backed up).
 
-### `ask`: one secret, one target
+Restart your agent afterwards. In Codex, open `/hooks` once and trust the secret-drop guard.
+`secret-drop uninstall` removes everything again. The first time the dialog opens, macOS asks whether
+your terminal (or the app running your agent) may control **System Events**; allow it, because that
+is how the dialog comes to the front.
+
+## Quick start
+
+You rarely type these yourself; the skill teaches your agent to. But this is the whole flow:
 
 ```bash
-secret-drop ask NAME TARGET ["hint shown in the dialog"] [--then "command"]
+# 1. ask: the value goes to the Keychain, .env gets a reference that is safe to read
+secret-drop ask STRIPE_SECRET_KEY keychain:myapp --ref .env "Stripe Dashboard → Developers → API keys"
+
+# 2. use: injected into the process, scrubbed from its output
+secret-drop run -f .env -- node app.js
+
+# 3. see what exists: names only
+secret-drop list .env
 ```
 
-`NAME` must look like an environment variable (`^[A-Z][A-Z0-9_]*$`). The dialog closes on its own
-after 10 minutes. Cancelling, timing out or submitting an empty field writes nothing.
+<img src="docs/terminal-en.svg" alt="Terminal: secret-drop ask writes to the Keychain, cat .env shows only a reference, secret-drop run prints [redacted:STRIPE_SECRET_KEY]">
+
+## Commands
+
+### `ask`: one secret into one target
+
+```bash
+secret-drop ask NAME TARGET ["hint shown in the dialog"] [--ref FILE] [--then "command"]
+```
 
 | Target | What happens |
 |---|---|
-| `file:<path>` | Sets `NAME=value` in a local env file. Other lines are kept, the write is atomic and the file ends up with mode `600`. |
-| `ssh:<host>:<path>` | Does the same on a remote host. The value travels over ssh's **stdin**, never on the command line. `<host>` can be anything `ssh` accepts, including aliases from `~/.ssh/config`. |
-| `keychain:<service>` | Stores a generic password in the macOS login keychain (service = `<service>`, account = `NAME`). The value goes to `security -i` over stdin. |
-| `exec:<command>` | Runs a shell command with the value on **stdin** and the name in `$SECRET_DROP_NAME`. The command's stdout is discarded, so it cannot echo the value back to the agent. |
-| `@<name>` | A target defined in the config file (see below). |
+| `keychain:<service>` | Stores the value in the macOS login keychain (service `<service>`, account `NAME`). With `--ref .env`, also writes `NAME=keychain:<service>` to `.env`. **Recommended.** |
+| `file:<path>` (or just a path) | Sets `NAME=value` in an env file: mode `600`, atomic write, added to `.gitignore`. It refuses files that git already tracks. |
+| `ssh:<host>:<path>` | The same on a remote host. The value travels over ssh's stdin, never on the command line. Add `--then "ssh <host> sudo systemctl restart app"` to restart the service. |
+| `exec:<command>` | Pipes the value into any command, with the name in `$SECRET_DROP_NAME`, e.g. `exec:gh secret set "$SECRET_DROP_NAME"`. The command's stdout is discarded. |
+| `@<name>` | A destination from the config file (see below). |
+
+`NAME` must look like an environment variable. The dialog closes on its own after 10 minutes. Exit
+codes: `0` saved, `1` cancelled, `2` bad usage, `3` no dialog could open (e.g. inside a sandbox). On
+success it prints one line, and clears the clipboard if it still holds the value:
+
+```
+STRIPE_SECRET_KEY → keychain:myapp, reference in .env written (length 107, clipboard cleared)
+```
+
+### `run`: use secrets without seeing them
 
 ```bash
-# local .env
-secret-drop ask OPENAI_API_KEY file:.env "platform.openai.com → API keys"
-
-# env file on a server, then restart the service
-secret-drop ask STRIPE_SECRET_KEY ssh:deploy@app.example.com:/srv/app/.env \
-  "Stripe Dashboard → Developers → API keys" \
-  --then "ssh deploy@app.example.com sudo systemctl restart app"
-
-# macOS Keychain
-secret-drop ask GITHUB_TOKEN keychain:my-scripts
-
-# anything that reads stdin, e.g. a GitHub Actions secret
-secret-drop ask NPM_TOKEN 'exec:gh secret set "$SECRET_DROP_NAME" --repo me/my-lib'
+secret-drop run -f .env [-f more.env] -- command [args...]
 ```
 
-On success, `ask` prints one line:
+Loads `KEY=value` lines literally (never as shell code), resolves `keychain:` references, and starts
+the command with them in its environment. Its stdout and stderr are streamed through a scrubber that
+replaces every secret value, including its base64 and URL-encoded forms, with
+`[redacted:NAME]`. It also catches well-known key shapes it was never told about: AWS, GitHub, GitLab,
+Slack, Google, OpenAI, Anthropic, Stripe, JWTs and private keys. Values that don't look secret (like
+`PORT=3000`) are left alone. The exit code is passed through.
 
-```
-STRIPE_SECRET_KEY → @prod written (length 107)
-```
+### `guard`: stop the agent from reading secrets
 
-`--then` runs after a successful write. It never sees the value; it gets `$SECRET_DROP_NAMES` and
-`$SECRET_DROP_TARGET` in its environment.
+`install.sh` registers `secret-drop guard` as a `PreToolUse` hook in Claude Code and Codex. Hook
+denials apply even in bypass-permissions mode. The guard blocks:
+
+- reading, grepping or editing secret files: `.env`, `.env.*`, `*.env`, `.envrc`, `.netrc`, `.npmrc`,
+  `credentials`, private keys, and every file secret-drop has written to;
+- shell commands that touch those files (`cat .env`, `cp .env /tmp/x`, `$(cat .env)`…) or read the
+  keychain (`security find-generic-password -w`, `dump-keychain -d`).
+
+It deliberately allows `.env.example` and friends, files that hold only `keychain:` references,
+`secret-drop` itself, and harmless commands like `ls` or `cp .env.example .env`. When it blocks
+something, it tells the agent what to do instead. Tune it in the config file under `[guard]`.
+
+### `list` and `targets`
+
+`secret-drop list <target>` prints the names in a file, server env file or keychain service, never
+the values. `secret-drop targets` lists the destinations you configured.
 
 ### `google-oauth`: a refresh token without copy-paste
 
 ```bash
-secret-drop google-oauth PREFIX CLIENT_ID "SCOPES" TARGET [--no-open] [--reuse-secret] [--then "command"]
+secret-drop google-oauth PREFIX CLIENT_ID "SCOPES" TARGET [--no-open] [--reuse-secret] [--ref FILE]
 ```
 
-This runs the whole Google OAuth consent flow for an **OAuth client of type "Desktop app"**:
+This runs Google's consent flow for an OAuth client of type **Desktop app**:
 
-1. Asks for the client secret in the dialog (or, with `--reuse-secret`, reads `PREFIX_CLIENT_SECRET`
-   back from the target, which is useful when you re-authorize).
-2. Starts a one-shot listener on `127.0.0.1` on a random port, with a `state` check and PKCE (S256).
-3. Opens the consent screen in your browser. With `--no-open` it prints the URL as `AUTH_URL <url>`
-   instead, so you can open it in a specific Chrome profile.
-4. Exchanges the code and writes `PREFIX_CLIENT_ID`, `PREFIX_CLIENT_SECRET` and
-   `PREFIX_REFRESH_TOKEN` to the target.
+1. It asks for the client secret in the dialog, or with `--reuse-secret` reads it back from the
+   target.
+2. It listens once on `127.0.0.1` with a `state` check and PKCE.
+3. It opens the consent screen, or prints `AUTH_URL …` with `--no-open` so you can pick a browser
+   profile.
+4. It stores `PREFIX_CLIENT_ID`, `PREFIX_CLIENT_SECRET` and `PREFIX_REFRESH_TOKEN`.
 
-```bash
-secret-drop google-oauth GMAIL 1234-abc.apps.googleusercontent.com \
-  "https://www.googleapis.com/auth/gmail.readonly" @prod --no-open
-```
+<img src="docs/oauth-en.svg" alt="Terminal output of secret-drop google-oauth">
 
-<img src="docs/terminal-en.svg" alt="Terminal output of secret-drop ask and google-oauth, showing only names, targets and lengths">
+## Configuration
 
-### Config file and named targets
-
-`~/.config/secret-drop/config` (or `$XDG_CONFIG_HOME/secret-drop/config`, or `$SECRET_DROP_CONFIG`):
+`~/.config/secret-drop/config` (or `$SECRET_DROP_CONFIG`):
 
 ```ini
 [settings]
-# en or tr; defaults to your locale
-lang = en
-# seconds before the dialog gives up
-timeout = 600
+lang = en          ; en or tr, defaults to your locale
+timeout = 600      ; seconds before the dialog gives up
 
 [target.prod]
 target = ssh:deploy@app.example.com:/srv/app/.env
 then = ssh deploy@app.example.com sudo systemctl restart app
 
-[target.local]
-target = file:~/projects/app/.env
+[target.myapp]
+target = keychain:myapp
+ref = ~/projects/myapp/.env
+
+[guard]
+protect = *.secret, ~/.vault/*   ; extra files to guard
+allow = .env.test                ; files the guard should let through
 ```
 
-Then `secret-drop ask STRIPE_SECRET_KEY @prod` writes to the server and restarts the service, and
-`secret-drop targets` lists what is configured, so an agent can discover where things go.
-
-| Environment variable | Meaning |
-|---|---|
-| `SECRET_DROP_CONFIG` | Path to the config file. |
-| `SECRET_DROP_LANG` | `en` or `tr`. Overrides the config and your locale. |
-| `SECRET_DROP_TIMEOUT` | Dialog timeout in seconds. |
-| `SECRET_DROP_PROMPTER` | A shell command that prints the secret on stdout, used instead of the dialog. It receives `$SECRET_DROP_NAME` and `$SECRET_DROP_PROMPT`. The tests use it; you could also point it at a password manager CLI. |
-
-## Tell your agent
-
-Paste this into `CLAUDE.md`, `AGENTS.md` or your agent's system prompt:
-
-```markdown
-## Secrets
-- Never ask the user to paste an API key, token, password or client secret into the chat.
-- When you need one, run `secret-drop ask <NAME> <target> "<where to find it>"`. A dialog opens on
-  the user's screen, the value goes straight to the target and you only see its length.
-- Targets: `@<name>` (list them with `secret-drop targets`), `file:<path>`, `ssh:<host>:<path>`,
-  `keychain:<service>`, `exec:<command>`. Add `--then "<command>"` to restart a service afterwards.
-- For a Google OAuth refresh token run
-  `secret-drop google-oauth <PREFIX> <client_id> "<scopes>" <target>`.
-- Never print a secret back: no `cat`, `grep` or `echo` on files that hold secrets. Refer to secrets
-  by name only.
-```
+`secret-drop targets` shows the destinations, so the agent can pick `@prod` or `@myapp` itself.
+Environment variables: `SECRET_DROP_CONFIG`, `SECRET_DROP_LANG`, `SECRET_DROP_TIMEOUT` and
+`SECRET_DROP_PROMPTER` (a command that prints the secret instead of opening the dialog; the tests use
+it).
 
 ## Security
 
 **What it protects**
 
-- **The chat transcript and the agent's context.** The value is never printed. Only its length is.
-- **Shell history and the process list.** The value is never part of a command line. It reaches
-  `ssh`, `security` and `exec:` commands over stdin, so `ps` and `~/.zsh_history` never contain it.
-- **Files at rest.** Env files are written atomically with mode `600`, locally and remotely.
-- **Mistakes before the paste.** The name and the target are validated, and ssh connectivity is
-  checked, before the dialog opens, so nobody pastes a key into a dead end.
-- **The OAuth redirect.** It listens on loopback only, checks `state`, uses PKCE and ignores stray
-  requests.
+- **The chat transcript and the model's context:** values are never printed, and `run` scrubs them
+  from output.
+- **Shell history and the process list:** values never appear on a command line. They reach `ssh`,
+  `security` and `exec:` over stdin.
+- **Accidental reads by the agent:** the guard blocks the common routes in Claude Code and Codex, and
+  `keychain:` references make the `.env` itself harmless.
+- **Accidental commits:** secret files go into `.gitignore`, and files git already tracks are refused.
+- **The clipboard:** it is cleared after a paste that was stored.
 
 **What it does not protect**
 
-- **Anyone who already has access to your machine or to the target.** Env files and the keychain are
-  only as safe as the account that owns them.
-- **The agent reading the target afterwards.** An agent with file or shell access can still run
-  `cat .env`. The instruction block above is a policy, not an enforcement mechanism. Combine it with
-  your agent's permission rules (for example, deny reads of `.env` files) if that matters to you.
-- **Your clipboard.** Copy-paste goes through the clipboard, so clipboard history managers keep a
-  copy. Exclude them or clear the history.
-- **The commands you write.** `exec:` and `--then` run what you give them.
-- **Focus.** The dialog takes keyboard focus when it opens. If you were typing elsewhere, your
-  keystrokes land in the hidden field. Cancel if you see dots you did not paste.
+- **A determined agent or malware running as you.** The guard covers the common routes, not every
+  possible one (a script that copies a file first, for example). It is a guardrail against mistakes,
+  not a sandbox.
+- **Anyone with access to your unlocked Mac.** Keychain items written by `security` can be read by
+  other `security` calls without a prompt.
+- **Clipboard history apps,** which may have already saved the paste before it was cleared.
+- **Focus:** the dialog takes keyboard focus when it opens. If you see dots you didn't paste, cancel.
 
 ## Platforms
 
-Tested on macOS. On Linux it falls back to `zenity` or `kdialog` if one is installed. That path is
-**experimental and untested**, and the `keychain:` target is macOS only.
+macOS is fully supported and tested. On Linux, `ask`, `run`, `list`, `guard` and the file and ssh
+targets work; the dialog falls back to `zenity` or `kdialog` and is **experimental**, and `keychain:`
+is macOS only.
 
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests                            # no GUI needed
-SECRET_DROP_TEST_KEYCHAIN=1 python3 -m unittest discover -s tests  # also writes to the login keychain, then cleans up
-python3 docs/make_screenshots.py                                 # regenerate docs/ images
+python3 -m unittest discover -s tests                              # 45 tests, no GUI needed
+SECRET_DROP_TEST_KEYCHAIN=1 python3 -m unittest discover -s tests  # also uses the login keychain, then cleans up
+python3 docs/make_screenshots.py                                   # regenerate the images in docs/
 ```
 
-The tests replace the dialog with `SECRET_DROP_PROMPTER`, put a fake `ssh` in `PATH` that runs the
-remote script locally (and records its argv, to prove the value is not in it), and run the OAuth flow
-against a local fake token endpoint that verifies the PKCE verifier.
+The tests replace the dialog with `SECRET_DROP_PROMPTER`, put a fake `ssh` on `PATH` (and check that
+the value never appears in its argv), run the OAuth flow against a local fake token endpoint that
+verifies PKCE, feed the guard real hook events, and install into a throwaway `HOME`. Before release,
+the skill and the guard were also checked in real Claude Code sessions: the agent picked
+`keychain: --ref .env` on its own, and every attempt to read the key was blocked.
 
-**How the images were made.** `docs/make_screenshots.py` opens the real dialog with a fake value
-prefilled and captures that one window with `screencapture -l`. It renders the terminal SVGs from
-real CLI output, produced with the same fake `ssh` and a fake Google token endpoint, so no real key,
-host or account appears anywhere. The demo GIF was rendered with [Remotion](https://www.remotion.dev).
+**How the images were made.** `docs/make_screenshots.py` opens the real dialog prefilled with a fake
+value and captures that one window. It renders the terminal images from real CLI output produced with
+fake values, so no real key, host or account appears anywhere. The demo was rendered with
+[Remotion](https://www.remotion.dev); its music was generated in code.
 
 ## License
 

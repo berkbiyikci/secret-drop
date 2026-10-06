@@ -1,18 +1,19 @@
 # Copy to ~/.config/secret-drop/config
 
 [settings]
-# en or tr (defaults to your locale)
-lang = en
-# seconds before the dialog gives up
-timeout = 600
+lang = en          ; en or tr (defaults to your locale)
+timeout = 600      ; seconds before the dialog gives up
 
-# `secret-drop ask NAME @prod` writes to this server and restarts the app
+# `secret-drop ask NAME @myapp`: value in the Keychain, reference in the project's .env
+[target.myapp]
+target = keychain:myapp
+ref = ~/projects/myapp/.env
+
+# `secret-drop ask NAME @prod`: writes to the server and restarts the app
 [target.prod]
 target = ssh:deploy@app.example.com:/srv/app/.env
 then = ssh deploy@app.example.com sudo systemctl restart app
 
-[target.local]
-target = file:~/projects/app/.env
-
-[target.mac]
-target = keychain:my-scripts
+[guard]
+protect = *.secret      ; extra files the guard should protect
+allow = .env.test       ; files the guard should let through
